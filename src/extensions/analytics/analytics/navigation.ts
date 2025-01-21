@@ -1,6 +1,7 @@
 import { truthy } from '../../../util/util';
-import Analytics from './Analytics';
+import AnalyticsUA from './AnalyticsUA';
 import { EventListeners, StateListeners } from '../types';
+import AnalyticsGA4 from './AnalyticsGA4';
 
 export const NAVIGATION_STATE_LISTENERS: StateListeners = [
   {
@@ -8,7 +9,8 @@ export const NAVIGATION_STATE_LISTENERS: StateListeners = [
     // or externally triggered EG: opening the feedback page
     path: ['session', 'base', 'mainPage'],
     callback: (previous, current) => {
-      Analytics.trackNavigation(current);
+      AnalyticsUA.trackNavigation(current);
+      AnalyticsGA4.trackPageView(current);
     },
   },
   {
@@ -16,7 +18,8 @@ export const NAVIGATION_STATE_LISTENERS: StateListeners = [
     path: ['session', 'base', 'secondaryPage'],
     callback: (previous, current) => {
       if (truthy(current)) {
-        Analytics.trackNavigation(`secondaryPage/${current}`);
+        AnalyticsUA.trackNavigation(`secondaryPage/${current}`);
+        AnalyticsGA4.trackPageView(`secondaryPage/${current}`);
       } // if current is null it means the secondary page got closed
     },
   },
@@ -24,7 +27,8 @@ export const NAVIGATION_STATE_LISTENERS: StateListeners = [
     // Check for navigation in the settings tabs
     path: ['session', 'base', 'settingsPage'],
     callback: (previous, current) => {
-      Analytics.trackNavigation(`settings/${current}`);
+      AnalyticsUA.trackNavigation(`settings/${current}`);
+      AnalyticsGA4.trackPageView(`settings/${current}`);
     },
   },
   {
@@ -32,7 +36,8 @@ export const NAVIGATION_STATE_LISTENERS: StateListeners = [
     path: ['session', 'base', 'visibleDialog'],
     callback: (previous, current) => {
       if (truthy(current)) {
-        Analytics.trackNavigation(`dialog/${current}`);
+        AnalyticsUA.trackNavigation(`dialog/${current}`);
+        AnalyticsGA4.trackPageView(`dialog/${current}`);
       }
     },
   },
@@ -43,7 +48,8 @@ export const NAVIGATION_EVENT_LISTENERS: EventListeners = [
     // Check for modal opening
     event: 'show-modal',
     callback: modalId => {
-      Analytics.trackNavigation(`modal/${modalId}`);
+      AnalyticsUA.trackNavigation(`modal/${modalId}`);
+      AnalyticsGA4.trackPageView(`modal/${modalId}`);
     },
   },
 ];

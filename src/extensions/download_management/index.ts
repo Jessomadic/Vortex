@@ -48,11 +48,11 @@ import observe, { DownloadObserver } from './DownloadObserver';
 import * as RemoteT from '@electron/remote';
 import Promise from 'bluebird';
 import * as _ from 'lodash';
-import { genHash, IHashResult } from 'modmeta-db';
 import Zip = require('node-7z');
 import * as path from 'path';
 import * as Redux from 'redux';
 import {generate as shortid} from 'shortid';
+import { fileMD5 } from 'vortexmt';
 import winapi from 'winapi-bindings';
 import lazyRequire from '../../util/lazyRequire';
 import setDownloadGames from './util/setDownloadGames';
@@ -154,7 +154,7 @@ function genDownloadChangeHandler(api: IExtensionApi,
                                   gameId: string,
                                   nameIdMap: { [name: string]: string },
                                   normalize: Normalize) {
-  const updateTimers: { [fileName: string]: NodeJS.Timer } = {};
+  const updateTimers: { [fileName: string]: NodeJS.Timeout } = {};
 
   const store: Redux.Store<any> = api.store;
 
@@ -410,6 +410,9 @@ function postImport(api: IExtensionApi, destination: string,
                     fileSize: number, silent: boolean): Promise<string> {
   const store = api.store;
   const gameMode = selectors.activeGameId(store.getState());
+  if (gameMode === undefined) {
+    return Promise.reject(new Error('no active game'));
+  }
 
   const dlId = shortid();
   const fileName = path.basename(destination);
@@ -477,6 +480,7 @@ function move(api: IExtensionApi,
     .then(() => fs.copyAsync(source, destination))
     .then(() => postImport(api, destination, fileSize, silent))
     .catch(err => {
+      api.showErrorNotification('Import Failed', err, { allowReport: false });
       log('info', 'failed to copy', {error: err.message});
       return undefined;
     })
@@ -507,6 +511,7 @@ function importDirectory(api: IExtensionApi,
     .then(() => fs.statAsync(destination))
     .then((stat: fs.Stats) => postImport(api, destination, stat.size, silent))
     .catch(err => {
+      api.showErrorNotification('Import Failed', err, { allowReport: false });
       log('info', 'failed to copy', {error: err.message});
       return undefined;
     })
@@ -680,12 +685,30 @@ function checkForUnfinalized(api: IExtensionApi,
       actions: [
         {
           title: 'Repair', action: dismiss => {
+            dismiss();
+
+            const notiId = shortid();
+            let completed = 0;
+
+            const progress = (title: string) => {
+              api.sendNotification({
+                id: notiId,
+                type: 'activity',
+                title: 'Finalizing downloads',
+                message: title,
+                progress: completed * 100 / unfinalized.length,
+              });
+            };
+
+            progress('...');
+
             Promise.map(unfinalized, id => {
               const gameId = Array.isArray(downloads[id].game)
                 ? downloads[id].game[0]
                 : gameMode;
               const downloadPath = selectors.downloadPathForGame(api.getState(), gameId);
               const filePath = path.join(downloadPath, downloads[id].localPath);
+              progress(downloads[id].localPath);
               if (downloads[id].state === 'finalizing') {
                 return finalizeDownload(api, id, filePath)
                   .catch(err => {
@@ -693,11 +716,12 @@ function checkForUnfinalized(api: IExtensionApi,
                       fileName: downloads[id].localPath,
                       error: err.message,
                     });
-                  });
+                  })
+                  .finally(() => ++completed);
               } else {
-                return genHash(filePath)
-                  .then((md5Hash: IHashResult) => {
-                    api.store.dispatch(setDownloadHash(id, md5Hash.md5sum));
+                return toPromise<string>(cb => fileMD5(filePath, cb, () => {}))
+                  .then(md5sum => {
+                    api.store.dispatch(setDownloadHash(id, md5sum));
                   })
                   .catch(err => {
                     if (err.code === 'ENOENT') {
@@ -707,10 +731,13 @@ function checkForUnfinalized(api: IExtensionApi,
                       log('error', 'failed to calculate hash for download', {
                         file: downloads[id].localPath, error: err.message });
                     }
-                  });
+                  })
+                  .finally(() => ++completed);
               }
-            })
-              .then(() => dismiss());
+            }, { concurrency: 4 })
+              .then(() => {
+                api.dismissNotification(notiId);
+              });
           },
         },
       ],
@@ -1040,9 +1067,15 @@ function init(context: IExtensionContextExt): boolean {
           maxWorkersDebouncer.schedule(undefined, newValue);
         });
 
+      const state = context.api.getState();
+
+      const maxParallelDownloads = (state.persistent['nexus']?.userInfo?.isPremium === true)
+        ? state.settings.downloads.maxParallelDownloads
+        : 1;
+
       manager = new DownloadManagerImpl(
           selectors.downloadPath(store.getState()),
-          store.getState().settings.downloads.maxParallelDownloads,
+          maxParallelDownloads,
           store.getState().settings.downloads.maxChunks, (speed: number) => {
             if ((speed !== 0) || (store.getState().persistent.downloads.speed !== 0)) {
               // this first call is only applied in the renderer for performance reasons
@@ -1074,7 +1107,6 @@ function init(context: IExtensionContextExt): boolean {
       });
       observer = observeImpl(context.api, manager);
 
-      const state = context.api.getState();
       const downloads = state.persistent.downloads?.files ?? {};
       const gameMode = selectors.activeGameId(state);
 

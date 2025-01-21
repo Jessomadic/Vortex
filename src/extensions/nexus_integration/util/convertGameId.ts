@@ -1,9 +1,9 @@
 import { inspect } from 'util';
 import { IGame } from '../../../types/IGame';
-import { IGameStored } from '../../../types/IState';
 import { log } from '../../../util/log';
 import { truthy } from '../../../util/util';
 import { SITE_ID } from '../../gamemode_management/constants';
+import { IGameStored, IGameStoredExt } from '../../gamemode_management/types/IGameStored';
 
 /**
  * get the nexus page id for a game
@@ -44,21 +44,29 @@ export function nexusGameId(game: IGameStored | IGame, fallbackGameId?: string):
  * get our internal game id for a nexus page id
  */
 export function convertGameIdReverse(knownGames: IGameStored[], input: string): string {
-  if (input === undefined) {
+  if (input?.toLowerCase === undefined) {
     return undefined;
   }
 
-  const game = knownGames.find(iter =>
+  const validGames = knownGames.filter(iter => iter.id === input.toLowerCase() ||
     (iter.details !== undefined) && (iter.details.nexusPageId === input));
+
+  // We obviously prefer the exact match first.
+  const game = validGames.find(iter => iter.id === input.toLowerCase());
   if (game !== undefined) {
     return game.id;
+  }
+
+  // Alternatively - there may be a nexus page id match.
+  if (validGames.length > 0) {
+    return validGames[0].id;
   }
 
   return {
     skyrimspecialedition: 'skyrimse',
     newvegas: 'falloutnv',
     elderscrollsonline: 'teso',
-  }[input.toLowerCase()] || input;
+  }[input.toLowerCase()] || input.toLowerCase();
 }
 
 /**
@@ -88,19 +96,19 @@ export function convertNXMIdReverse(knownGames: IGameStored[], input: string): s
 /**
  * get the nxm link id for a game
  */
-export function toNXMId(game: IGameStored, gameId: string): string {
+export function toNXMId(game: IGameStoredExt, gameId: string): string {
   // this is a bit of a workaround since "site" isn't and shouldn't be an
   // entry in the list of games (here or on the site)
   if (game === null) {
     return SITE_ID;
   }
-  if (game.details !== undefined) {
+  if (game?.details !== undefined) {
     if (game.details.nxmLinkId !== undefined) {
       return game.details.nxmLinkId;
     } else if (game.details.nexusPageId !== undefined) {
       return game.details.nexusPageId;
     }
-    gameId = game.id;
+    gameId = game.downloadGameId || game.id;
   }
   const gameIdL = gameId.toLowerCase();
   if (gameIdL === 'skyrimse') {

@@ -2,12 +2,12 @@ import * as RemoteT from '@electron/remote';
 import Nexus, {
   EndorsedStatus, ICollectionQuery, IEndorsement, IFileInfo, IGameListEntry, IModInfo,
   IOAuthCredentials,
-  IRevision, IRevisionQuery, IUpdateEntry, IValidateKeyResponse, NexusError, RateLimitError, TimeoutError,
+  IRevision, IRevisionQuery, IUpdateEntry, IValidateKeyResponse, NexusError, ProtocolError, RateLimitError, TimeoutError,
 } from '@nexusmods/nexus-api';
 import Promise from 'bluebird';
 import { ipcRenderer } from 'electron';
 import { TFunction } from 'i18next';
-import * as jwt from 'jsonwebtoken';
+import jwt from 'jsonwebtoken';
 import * as _ from 'lodash';
 import * as path from 'path';
 import * as Redux from 'redux';
@@ -15,12 +15,12 @@ import * as semver from 'semver';
 import { generate as shortId } from 'shortid';
 import * as util from 'util';
 import WebSocket from 'ws';
-import { addNotification, dismissNotification, setDialogVisible, setExtensionEndorsed, setModAttribute, setOAuthCredentials, setUserAPIKey } from '../../actions';
+import { addNotification, clearOAuthCredentials, dismissNotification, setDialogVisible, setExtensionEndorsed, setModAttribute, setOAuthCredentials, setUserAPIKey } from '../../actions';
 import { IExtensionApi, ThunkStore } from '../../types/IExtensionContext';
 import { IMod, IState } from '../../types/IState';
 import { getApplication } from '../../util/application';
 import { DataInvalid, HTTPError, ProcessCanceled, ServiceTemporarilyUnavailable, TemporaryError, UserCanceled } from '../../util/CustomErrors';
-import { contextify, setApiKey } from '../../util/errorHandling';
+import { contextify, setApiKey, setOauthToken } from '../../util/errorHandling';
 import * as fs from '../../util/fs';
 import getVortexPath from '../../util/getVortexPath';
 import github, { RateLimitExceeded } from '../../util/github';
@@ -37,8 +37,8 @@ import { SITE_ID } from '../gamemode_management/constants';
 import { gameById, knownGames } from '../gamemode_management/selectors';
 import modName from '../mod_management/util/modName';
 import { setUserInfo } from './actions/persistent';
-import { setLoginError, setLoginId } from './actions/session';
-import { NEXUS_DOMAIN, OAUTH_CLIENT_ID, OAUTH_REDIREC_URL, OAUTH_URL } from './constants';
+import { setLoginError, setLoginId, setOauthPending } from './actions/session';
+import { NEXUS_DOMAIN, OAUTH_CLIENT_ID, OAUTH_REDIRECT_URL, OAUTH_URL } from './constants';
 import NXMUrl from './NXMUrl';
 import * as sel from './selectors';
 import { isLoggedIn } from './selectors';
@@ -48,6 +48,7 @@ import { convertGameIdReverse, convertNXMIdReverse, nexusGameId } from './util/c
 import { endorseCollection, endorseMod } from './util/endorseMod';
 import { FULL_REVISION_INFO } from './util/graphQueries';
 import OAuth, { ITokenReply } from './util/oauth';
+import { IAccountStatus, IValidateKeyData, IValidateKeyDataV2 } from './types/IValidateKeyData';
 import { getPageURL } from './util/sso';
 import transformUserInfo from './util/transformUserInfo';
 
@@ -62,6 +63,16 @@ interface INexusLoginMessage {
   appid: string;
   protocol: number;
   token?: string;
+}
+
+interface IUserInfo {
+  sub: string;
+  name: string;
+  email: string;
+  avatar: string;
+  group_id: number;
+  membership_roles: string[];
+  premium_expiry: number;
 }
 
 let cancelLogin: () => void;
@@ -81,9 +92,25 @@ export function onCancelLoginImpl(api: IExtensionApi) {
 }
 
 export function bringToFront() {
-  remote.getCurrentWindow().setAlwaysOnTop(true);
-  remote.getCurrentWindow().show();
-  remote.getCurrentWindow().setAlwaysOnTop(false);
+  // if window is snapped in windows (aero snap), bringing the window to front
+  // will unsnap it and it will be moved/resized to where it was before snapping.
+  // This is quite irritating so this will store the (snapped) window position
+  // and return to it after bringing the window to front.
+  // This will cause a short "flicker" if the window was snapped and it will
+  // still unsnap the window as far as windows is concerned.
+
+  const window = remote.getCurrentWindow();
+  const [x, y] = window.getPosition();
+  const [w, h] = window.getSize();
+
+  window.setAlwaysOnTop(true);
+  window.show();
+  window.setAlwaysOnTop(false);
+
+  setTimeout(() => {
+    window.setPosition(x, y);
+    window.setSize(w, h);
+  }, 100);
 }
 
 function genId() {
@@ -214,33 +241,47 @@ function legacyConnect(api: IExtensionApi, callback: (err: Error) => void) {
 const oauth = new OAuth({
   baseUrl: OAUTH_URL,
   clientId: OAUTH_CLIENT_ID,
-  redirectUrl: OAUTH_REDIREC_URL,
-}, (openUrl: string) => opn(openUrl).catch(() => null));
+  redirectUrl: OAUTH_REDIRECT_URL,
+});
 
-export function requestLogin(api: IExtensionApi, callback: (err: Error) => void) {
+export function requestLogin(nexus: Nexus, api: IExtensionApi, callback: (err: Error) => void) {
   const stackErr = new Error();
 
-  return oauth.sendRequest((err: Error, token: ITokenReply) => {
+  return oauth.sendRequest(async (err: Error, token: ITokenReply) => {
+    // received reply from site for this state
+
+    bringToFront();
+    api.store.dispatch(setLoginId(undefined));
+    // set state to undefined so that we can close the modal?
+    api.store.dispatch(setDialogVisible(undefined));
+    api.store.dispatch(setOauthPending(undefined));
+
     if (err !== null) {
       return callback(err);
     }
 
     const tokenDecoded: IJWTAccessToken = jwt.decode(token.access_token);
 
-    api.store.dispatch(setOAuthCredentials(
-      token.access_token, token.refresh_token, tokenDecoded.fingerprint));
-    api.store.dispatch(setLoginId(undefined));
-    api.store.dispatch(setUserInfo(userInfoFromJWTToken(tokenDecoded)));
+    api.store.dispatch(setOAuthCredentials(token.access_token, token.refresh_token, tokenDecoded.fingerprint));
 
     callback(null);
+
+  }, (url: string) => {
+
+    // url has been generated by sentRequest
+
+    // open browser with oauth url
+    opn(url).catch(() => null);
+    // set state to url
+    api.store.dispatch(setOauthPending(url));
   })
-    .catch(err => {
-      err.stack = stackErr.stack;
-      callback(err);
-    });
+  .catch(err => {
+    err.stack = stackErr.stack;
+    callback(err);
+  });
 }
 
-export function oauthCallback(api: IExtensionApi, code: string, state: string) {
+export function oauthCallback(api: IExtensionApi, code: string, state?: string) {
   // the result of this is reported to the callback from requestLogin;
   return oauth.receiveCode(code, state);
 }
@@ -249,12 +290,14 @@ export function ensureLoggedIn(api: IExtensionApi): Promise<void> {
   if (!isLoggedIn(api.getState())) {
     return new Promise((resolve, reject) => {
       api.events.on('did-login', (err: Error) => {
+
         if (err !== null) {
           reject(err);
         } else {
           resolve();
         }
       });
+
       api.store.dispatch(setDialogVisible('login-dialog'));
     });
   } else {
@@ -371,12 +414,16 @@ export interface IRemoteInfo {
 
 export function getInfo(nexus: Nexus, domain: string, modId: number, fileId: number)
                         : Promise<IRemoteInfo> {
-  return Promise.all([ nexus.getModInfo(modId, domain), nexus.getFileInfo(modId, fileId, domain) ])
-    .catch(err => {
+  return Promise.resolve((async () => {
+    try {
+      const modInfo = await nexus.getModInfo(modId, domain);
+      const fileInfo = await nexus.getFileInfo(modId, fileId, domain);
+      return { modInfo, fileInfo };
+    } catch (err) {
       err['attachLogOnReport'] = true;
-      return Promise.reject(err);
-    })
-    .then(([ modInfo, fileInfo ]) => ({ modInfo, fileInfo }));
+      throw err;
+    }
+  })());
 }
 
 export function getCollectionInfo(nexus: Nexus,
@@ -862,6 +909,13 @@ export function refreshEndorsements(store: Redux.Store<any>, nexus: Nexus) {
     .then(endorsements => {
       const endorseMap: { [gameId: string]: { [modId: string]: EndorsedStatus } } =
         endorsements.reduce((prev, endorsement: IEndorsement) => {
+          // can't trust anyone these days...
+          if ((endorsement.domain_name === undefined)
+              || (endorsement.status === undefined)
+              || (endorsement.mod_id === undefined)) {
+            return prev;
+          }
+
           const gameId = convertGameIdReverse(knownGames(store.getState()),
                                               endorsement.domain_name);
           const modId = endorsement.mod_id;
@@ -1191,6 +1245,36 @@ function errorFromNexusError(err: NexusError): string {
   }
 }
 
+
+function getAccountStatus(apiUserInfo:IUserInfo):IAccountStatus {
+
+  if(apiUserInfo.group_id === 5) return IAccountStatus.Banned;
+  else if(apiUserInfo.group_id === 41) return IAccountStatus.Closed;
+  else if(apiUserInfo.membership_roles.includes('premium')) return IAccountStatus.Premium;
+  else if(apiUserInfo.membership_roles.includes('supporter') && !apiUserInfo.membership_roles.includes('premium') ) return IAccountStatus.Supporter;
+  else return IAccountStatus.Free;
+} 
+
+export function transformUserInfoFromApi(input: IUserInfo) {
+
+  const stateUserInfo:IValidateKeyDataV2 = {
+    email: input.email,
+    isPremium: input.membership_roles.includes('premium'),
+    isSupporter: input.membership_roles.includes('supporter'),
+    name: input.name,
+    profileUrl: input.avatar,
+    userId: Number.parseInt(input.sub),
+    isLifetime:  input.membership_roles.includes('lifetimepremium'),
+    isBanned: input.group_id === 5,
+    isClosed: input.group_id === 41 ,
+    status: getAccountStatus(input)
+  };
+  
+  //log('info', 'transformUserInfoFromApi()', stateUserInfo);
+
+  return stateUserInfo;
+}
+
 function userInfoFromJWTToken(input: IJWTAccessToken) {
   return {
     email: '',
@@ -1202,14 +1286,60 @@ function userInfoFromJWTToken(input: IJWTAccessToken) {
   };
 }
 
-function updateUserInfo(api: IExtensionApi,
+export function getOAuthTokenFromState(api: IExtensionApi) {
+  
+  const state = api.getState();
+  const apiKey = state.confidential.account?.['nexus']?.['APIKey'];
+  const oauthCred:IOAuthCredentials = state.confidential.account?.['nexus']?.['OAuthCredentials'];
+
+  //log('info', 'getOAuthTokenFromState()');
+  //log('info', 'api key', apiKey !== undefined);
+  //log('info', 'oauth cred', oauthCred !== undefined);
+
+  return oauthCred !== undefined ? oauthCred.token : undefined;
+}
+
+function getUserInfo(api: IExtensionApi,
                         nexus: Nexus,
-                        userInfo: IValidateKeyResponse)
+                        /*userInfo: IValidateKeyResponse*/)
                         : Promise<boolean> {
-  if (userInfo !== null) {
-    api.store.dispatch(setUserInfo(transformUserInfo(userInfo)));
-    api.events.emit('did-login', null);
+
+
+
+  log('info', 'updateUserInfo()')
+  
+  /**
+   * This is where we are primarily updating the user info in the state.
+   * I've added a check for the oauth token in the state, and if it exists, updates
+   * from the nexus api instead of the information that was supplied in
+   * oauth token itself as this could be out of date 
+   */
+  //const token = getOAuthTokenFromState(api);
+
+  if(isLoggedIn(api.getState())) {
+    
+    // get userinfo from api
+    return Promise.resolve(nexus.getUserInfo())
+      .then(apiUserInfo => {
+        // update state with new info from endpoint
+        api.store.dispatch(setUserInfo(transformUserInfoFromApi(apiUserInfo)));
+        //log('info', 'getUserInfo() nexus.getUserInfo response', apiUserInfo);
+        return true;
+      })
+      .catch((err) => {
+        //log('error', `getUserInfo() nexus.getUserInfo response ${err.message}`, err);
+        showError(api.store.dispatch, 'An error occurred refreshing user info', err, {
+          allowReport: false,
+        });
+        return false;
+      });
+
+      
+  } else {
+      log('warn', 'updateUserInfo() not logged in');
   }
+  
+  /*
   return github.fetchConfig('api')
     .then(configObj => {
       const currentVer = getApplication().version;
@@ -1233,40 +1363,60 @@ function updateUserInfo(api: IExtensionApi,
     .catch(err => {
       log('warn', 'Failed to fetch api config', { message: err.message });
     })
-    .then(() => true);
-
+    .then(() => true);*/
 }
 
-function onJWTTokenRefresh(api: IExtensionApi, credentials: IOAuthCredentials) {
+function onJWTTokenRefresh(api: IExtensionApi, credentials: IOAuthCredentials, nexus: Nexus) {
+  
+  log('info', 'onJWTTokenRefresh');
+
+  // sets state oauth credentials
   api.store.dispatch(setOAuthCredentials(
     credentials.token, credentials.refreshToken, credentials.fingerprint));
+
+  // if we've had a token refresh, then we need to update userinfo
+  // EDIT: we don't want this as it doesnt' make sense if the refresh is completed by a userInfo check.
+  // we will leave thie as an 'oauth credentials only' function. updating the state with updated token
+  // and then that will perform updateToken below and make sure both node-neuxs and state are in sync.
+
+  //Promise.resolve(getUserInfo(api, nexus)); 
 }
 
-export function updateToken(api: IExtensionApi,
-                            nexus: Nexus,
-                            token: any)
-                            : Promise<boolean> {
+export function updateToken(api: IExtensionApi, nexus: Nexus, credentials: any): Promise<boolean> {
+  setOauthToken(credentials); // used for reporting, unimportant right now
+                        
+  log('info', 'updateToken()'); 
+
+  // update the nexus-node object with our credentials.
+  // could be from nexus_integration once() or from when the credentials are updated in state
+
   return Promise.resolve(nexus.setOAuthCredentials({
-    fingerprint: token.fingerprint,
-    refreshToken: token.refreshToken,
-    token: token.token,
-  }, {
-    id: OAUTH_CLIENT_ID,
-  }, (credentials: IOAuthCredentials) => onJWTTokenRefresh(api, credentials)))
-    .then(userInfo => updateUserInfo(api, nexus, userInfo))
-    // .then(() => true)
+      fingerprint: credentials.fingerprint,
+      refreshToken: credentials.refreshToken,
+      token: credentials.token,
+    }, {
+      id: OAUTH_CLIENT_ID,
+    }, (credentials: IOAuthCredentials) => onJWTTokenRefresh(api, credentials, nexus) // callback for when token is refreshed by nexus-node    
+  ))
+    .then(() => getUserInfo(api, nexus)) // update userinfo as we've set some new nexus credentials, either by launch, login or token refresh
+    .then(() => true)
     .catch(err => {
-      api.showErrorNotification('Authentication failed, please log in again', err);
+      api.showErrorNotification('Authentication failed, please log in again', err, {
+        allowReport: false,
+      });
       api.store.dispatch(setUserInfo(undefined));
       api.events.emit('did-login', err);
       return false;
     })
 }
 
+
+
 export function updateKey(api: IExtensionApi, nexus: Nexus, key: string): Promise<boolean> {
   setApiKey(key);
-  return Promise.resolve(nexus.setKey(key))
-    .then(userInfo => updateUserInfo(api, nexus, userInfo))
+  return Promise.resolve(nexus.setKey(key)) 
+    .then(() => true) 
+    //.then(userInfo => updateUserInfo(api, nexus))
     // don't stop the login just because the github rate limit is exceeded
     .catch(RateLimitExceeded, () => Promise.resolve(true))
     .catch(TimeoutError, err => {

@@ -1,3 +1,4 @@
+/* eslint-disable */
 import { setToolRunning } from '../actions';
 import { IDiscoveredTool } from '../types/IDiscoveredTool';
 import { IGame } from '../types/IGame';
@@ -22,7 +23,7 @@ import getVortexPath from './getVortexPath';
 import Promise from 'bluebird';
 import * as fs from 'fs';
 import * as path from 'path';
-import { GameEntryNotFound } from '../types/IGameStore';
+import { GameEntryNotFound, GameStoreNotFound } from '../types/IGameStore';
 
 function getCurrentWindow() {
   if (process.type === 'renderer') {
@@ -78,14 +79,19 @@ class StarterInfo implements IStarterInfo {
     const game: IGame = getGame(info.gameId);
     const launcherPromise: Promise<{ launcher: string, addInfo?: any }> =
       (game.requiresLauncher !== undefined) && info.isGame
-      ? game.requiresLauncher(path.dirname(info.exePath), info.store)
+      ? Promise.resolve(game.requiresLauncher(path.dirname(info.exePath), info.store))
         .catch(err => {
           if (err instanceof UserCanceled) {
             // warning because it'd be kind of unusual for the user to have to confirm anything
             // in requiresLauncher
             log('warn', 'failed to determine if launcher is required because user canceled something');
           } else {
-            onShowError('Failed to determine if launcher is required', err, true);
+            const allowReport = !game.contributed;
+            const errorObj = allowReport ? err : { message: 'Report this to the community extension author, not Vortex support!' };
+            onShowError('Failed to determine if launcher is required', errorObj, allowReport);
+            if (!allowReport) {
+              log('error', 'failed to determine if launcher is required', errorObj.message);
+            }
           }
           return Promise.resolve(undefined);
         })
@@ -118,6 +124,12 @@ class StarterInfo implements IStarterInfo {
             const errorMsg = [err.message, err.storeName, err.existingGames].join(' - ');
             log('error', errorMsg);
             onShowError('Failed to start game through launcher', err, !game.contributed);
+            return StarterInfo.runDirectly(info, api, onShowError, onSpawned);
+          })
+          .catch(GameStoreNotFound, err => {
+            onShowError(
+              'Failed to start game through launcher',
+              `Game store "${err.storeName}" not supported, is the extension disabled?`, false);
             return StarterInfo.runDirectly(info, api, onShowError, onSpawned);
           })
           .catch(err => {

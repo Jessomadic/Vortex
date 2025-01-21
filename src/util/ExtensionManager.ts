@@ -1,9 +1,11 @@
+/* eslint-disable */
 import { forgetExtension, removeExtension, setExtensionEnabled, setExtensionVersion } from '../actions/app';
 import { addNotification, closeDialog, DialogActions, DialogType, dismissNotification,
          IDialogContent, showDialog } from '../actions/notifications';
 import { suppressNotification } from '../actions/notificationSettings';
 import { setExtensionLoadFailures } from '../actions/session';
 
+import { setOptionalExtensions } from '../extensions/extension_manager/actions';
 import { IAvailableExtension, IExtension } from '../extensions/extension_manager/types';
 import { IModReference, IModRepoId } from '../extensions/mod_management/types/IMod';
 import { ExtensionInit } from '../types/Extension';
@@ -19,19 +21,20 @@ import {
   IReducerSpec,
   IRunOptions,
   IRunParameters,
+  ISaveOptions,
   StateChangeCallback,
   ThunkStore,
   ToolParameterCB,
 } from '../types/IExtensionContext';
 import { ILookupOptions, IModLookupResult } from '../types/IModLookupResult';
 import { INotification } from '../types/INotification';
-import { IExtensionLoadFailure, IExtensionState, IState } from '../types/IState';
+import { IExtensionLoadFailure, IExtensionOptional, IExtensionState, IState } from '../types/IState';
 
 import { Archive } from './archives';
 import { COMPANY_ID } from './constants';
 import { MissingDependency, NotSupportedError,
         ProcessCanceled, ThirdPartyError, TimeoutError, UserCanceled } from './CustomErrors';
-import { isOutdated } from './errorHandling';
+import { disableErrorReport, isOutdated } from './errorHandling';
 import getVortexPath from './getVortexPath';
 import { i18n, TString } from './i18n';
 import lazyRequire from './lazyRequire';
@@ -47,7 +50,7 @@ import { filteredEnvironment, isFunction, setdefault, timeout, truthy, wrapExtCB
 
 import Promise from 'bluebird';
 import { spawn, SpawnOptions } from 'child_process';
-import { ipcMain, ipcRenderer, OpenDialogOptions, WebContents } from 'electron';
+import { ipcMain, ipcRenderer, OpenDialogOptions, SaveDialogOptions, WebContents } from 'electron';
 import { EventEmitter } from 'events';
 import * as fs from 'fs-extra';
 import * as fuzz from 'fuzzball';
@@ -65,6 +68,7 @@ import stringFormat from 'string-template';
 import * as winapiT from 'vortex-run';
 import { getApplication } from './application';
 import makeRemoteCall, { makeRemoteCallSync } from './electronRemote';
+import { VCREDIST_URL } from '../constants';
 
 export function isExtSame(installed: IExtension, remote: IAvailableExtension): boolean {
   if (installed.modId !== undefined) {
@@ -130,6 +134,23 @@ const showOpenDialog = makeRemoteCall('show-open-dialog',
     }
 
     return electron.dialog.showOpenDialog(window, options);
+  });
+
+const showSaveDialog = makeRemoteCall('show-save-dialog',
+(electron, contents, options: Electron.SaveDialogOptions) => {
+  let window: Electron.BrowserWindow = null;
+  try {
+    window = electron.BrowserWindow?.fromWebContents?.(contents);
+  } catch (err) {
+    // nop
+  }
+
+  return electron.dialog.showSaveDialog(window, options);
+});
+
+const appExit = makeRemoteCallSync('exit-application',
+  (electron, contents, exitCode?: number) => {
+    electron.app.exit(exitCode);
   });
 
 const showErrorBox = makeRemoteCall('show-error-box',
@@ -442,6 +463,25 @@ class ContextProxyHandler implements ProxyHandler<any> {
   }
 
   /**
+   * Retrieve the map of optional extensions
+   *  Each optional requireExtension call is added against the id of the extension that requires it.
+   */
+  public getOptionalExtensions(allExtensions: IRegisteredExtension[]) {
+    const optionalRequireCalls = this.getCalls('requireExtension').filter(iter => iter.arguments.length > 2 && iter.arguments[2] === true);
+    const missingOptionals = optionalRequireCalls.reduce((acc, iter) => {
+      const callingExtensionKey = iter.extension;
+      const requiredKey = iter.arguments[0];
+      const ext = this.findExt(requiredKey, allExtensions);
+      if (ext === undefined) {
+        const optional: IExtensionOptional = { id: requiredKey, args: iter.arguments, extensionPath: iter.extensionPath };
+        acc = {...acc, [callingExtensionKey]: [].concat(acc[callingExtensionKey] || [], optional) as IExtensionOptional[]};
+      }
+      return acc;
+    }, {});
+    return missingOptionals;
+  }
+
+  /**
    * remove all init calls from incompatible extensions
    */
   public unloadIncompatible(furtherAPIs: Set<string>,
@@ -461,20 +501,16 @@ class ContextProxyHandler implements ProxyHandler<any> {
         .push({ id: 'unsupported-api' });
     });
 
-    const findExt = (id: string) => {
-      return allExtensions.find(ext => (ext.info?.name === id)
-                                    || (ext.info?.id === id)
-                                    || (ext.name === id));
-    };
-
-    const testValid = (extId: string, requiredId?: string, version?: string) => {
-      const req = findExt(requiredId);
-      if (req === undefined) {
-        setdefault(incompatibleExtensions, extId, []).push(
-          { id: 'dependency', args: { dependencyId: requiredId } });
-      } else if ((version !== undefined) && !semver.satisfies(req.info?.version, version)) {
-        setdefault(incompatibleExtensions, extId, []).push(
-          { id: 'dependency', args: { dependencyId: requiredId, version } });
+    const testValid = (extId: string, requiredId?: string, version?: string, optional?: boolean) => {
+      if (!optional) {
+        const req = this.findExt(requiredId, allExtensions);
+        if (req === undefined) {
+          setdefault(incompatibleExtensions, extId, []).push(
+            { id: 'dependency', args: { dependencyId: requiredId } });
+        } else if ((version !== undefined) && !semver.satisfies(req.info?.version, version)) {
+          setdefault(incompatibleExtensions, extId, []).push(
+            { id: 'dependency', args: { dependencyId: requiredId, version } });
+        }
       }
     };
 
@@ -604,6 +640,12 @@ class ContextProxyHandler implements ProxyHandler<any> {
 
     return Object.keys(dummy);
   }
+
+  public findExt = (id: string, allExtensions?: IRegisteredExtension[]) => {
+    return allExtensions.find(ext => (ext.info?.name === id)
+                                  || (ext.info?.id === id)
+                                  || (ext.name === id));
+  };
 }
 
 class EventProxy extends EventEmitter {
@@ -741,6 +783,7 @@ class ExtensionManager {
   private mContextProxyHandler: ContextProxyHandler;
   private mExtensionState: { [extId: string]: IExtensionState };
   private mLoadFailures: { [extId: string]: IExtensionLoadFailure[] } = {};
+  private mOptionalExtensions: { [extId: string]: IExtensionOptional[] } = {};
   private mInterpreters: { [ext: string]: (input: IRunParameters) => IRunParameters };
   private mStartHooks: IStartHook[];
   private mToolParameterCBs: ToolParameterCB[];
@@ -771,6 +814,7 @@ class ExtensionManager {
     this.mApi = {
       showErrorNotification: this.showErrorBox,
       selectFile: this.selectFile,
+      saveFile: this.saveFile,
       selectExecutable: this.selectExecutable,
       selectDir: this.selectDir,
       events: this.mEventEmitter,
@@ -918,7 +962,7 @@ class ExtensionManager {
       
       if ((extension !== undefined)
           && (extension.info !== undefined)
-          && (extension.info.author !== COMPANY_ID + 'x')) {
+          && (extension.info.author !== COMPANY_ID)) {
         if (options === undefined) {
           options = {};
         }
@@ -965,9 +1009,49 @@ class ExtensionManager {
         this.mApi.showErrorNotification(message, data, options || undefined);
       });
 
+      store.dispatch(setOptionalExtensions(this.mOptionalExtensions));
       store.dispatch(setExtensionLoadFailures(this.mLoadFailures));
     } else {
       this.migrateExtensions();
+    }
+    this.reportExtLoadErrors();
+  }
+
+  private reportExtLoadErrors() {
+    const nodeLoadErr = Object.values(this.mLoadFailures).flat(1)
+      .find(_ => {
+        const msg = _.args?.message ?? '';
+        return msg.includes('The specified module could not be found.') && msg.includes('.node');
+      });
+    if (nodeLoadErr !== undefined) {
+      this.mApi.store?.dispatch?.(showDialog('error', 'Extension failed to load', {
+        bbcode: 'An unexpected error occurred while Vortex was loading extension:<br/><br/>{{message}}<br/><br/>'
+
+          + 'This is often caused by a bad installation of the app, '
+          + 'a security app interfering with Vortex '
+          + 'or a problem with the Microsoft Visual C++ Redistributable installed on your PC. '
+          + 'To solve this issue please try the following:<br/><br/>'
+
+          + '- Wait a moment and try starting Vortex again<br/>'
+          + '- Reinstall Vortex from the Nexus Mods website<br/>'
+          + '- Install the latest Microsoft Visual C++ Redistributable ([url]{{url}}[/url])<br/>'
+          + '- Disable anti-virus or other security apps that might interfere and install Vortex again<br/><br/>'
+
+          + 'If the issue persists, please create a thread in our support forum for further assistance.',
+        parameters: {
+          message: nodeLoadErr.args.message,
+          url: VCREDIST_URL,
+        },
+      }, [
+        {
+          label: 'Ignore',
+          action: () => disableErrorReport(),
+        },
+        {
+          label: 'Close Vortex',
+          action: () => appExit(),
+        },
+      ], 'ext-load-native-failed'));
     }
   }
 
@@ -1382,6 +1466,8 @@ class ExtensionManager {
         ExtensionManager.sUIAPIs, this.mExtensions),
     };
 
+    this.mOptionalExtensions = this.mContextProxyHandler.getOptionalExtensions(this.mExtensions);
+
     // apply api extensions immediately after all extensions are loaded so they
     // become available asap
     this.apply('registerAPI', (key: string, func: (...args: any[]) => any, options: IApiAddition) => {
@@ -1455,6 +1541,21 @@ class ExtensionManager {
     return Promise.resolve(showOpenDialog(fullOptions))
       .then(result => (result.filePaths !== undefined) && (result.filePaths.length > 0)
         ? result.filePaths[0]
+        : undefined);
+  }
+
+  private saveFile(options: ISaveOptions): Promise<string> {
+    const fullOptions: SaveDialogOptions = {
+      //..._.omit(options, ['create']),
+      //properties: ['showOverwriteConfirmation'],
+      ...options
+    };
+    //if (options === true) {
+      //fullOptions.properties.push('showOverwriteConfirmation');
+    //}
+    return Promise.resolve(showSaveDialog(fullOptions))
+      .then(result => (result.filePath !== undefined)
+        ? result.filePath
         : undefined);
   }
 
@@ -2339,7 +2440,8 @@ class ExtensionManager {
       'tool_variables_base',
       'history_management',
       'analytics',
-      'onboarding_dashlet'
+      'onboarding_dashlet',
+      'mod_spotlights_dashlet'
     ];
 
     require('./extensionRequire').default(() => this.extensions);

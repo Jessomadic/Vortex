@@ -123,14 +123,14 @@ class SuperTable extends ComponentEx<IProps, IComponentState> {
   private mRowRefs: { [id: string]: HTMLElement } = {};
   private mLastSelectOnly: number = 0;
   private mLastDetailIds: string[] = [];
-  private mDetailTimer: NodeJS.Timer = null;
+  private mDetailTimer: NodeJS.Timeout = null;
   private mLastUpdateState: IProps = undefined;
   private mNextUpdateState: IProps = undefined;
   private mUpdateInProgress: boolean = false;
   private mNextState: IComponentState = undefined;
   private mNextVisibility: { [id: string]: boolean } = {};
   private mDelayedVisibility: { [id: string]: boolean } = {};
-  private mDelayedVisibilityTimer: NodeJS.Timer;
+  private mDelayedVisibilityTimer: NodeJS.Timeout;
   private mProxyHeaderRef: HTMLElement;
   private mVisibleHeaderRef: HTMLElement;
   private mHeaderUpdateDebouncer: Debouncer;
@@ -979,6 +979,8 @@ class SuperTable extends ComponentEx<IProps, IComponentState> {
     this.mHeaderUpdateDebouncer.schedule();
   }
 
+  private mLastHeaderHeight: number = 0;
+
   private updateColumnWidth() {
     if (!truthy(this.mProxyHeaderRef) || !truthy(this.mVisibleHeaderRef)) {
       return;
@@ -991,7 +993,10 @@ class SuperTable extends ComponentEx<IProps, IComponentState> {
     });
 
     const height = this.mVisibleHeaderRef.clientHeight;
-    this.mScrollRef.style['marginTop'] = `${height}px`;
+    if (height !== this.mLastHeaderHeight) {
+      this.mScrollRef.style['marginTop'] = `${height}px`;
+      this.mLastHeaderHeight = height;
+    }
   }
 
   private setPinnedRef = ref => {

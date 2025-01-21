@@ -1,4 +1,5 @@
-import { NEXUS_DOMAIN, NEXUS_PROTOCOL } from '../extensions/nexus_integration/constants';
+/* eslint-disable */
+import { NEXUS_DOMAIN, NEXUS_FLAMEWORK_SUBDOMAIN, NEXUS_NEXT_SUBDOMAIN, NEXUS_PROTOCOL, NEXUS_USERS_SUBDOMAIN } from '../extensions/nexus_integration/constants';
 
 import { TimeoutError } from './CustomErrors';
 import { Normalize } from './getNormalizeFunc';
@@ -99,20 +100,22 @@ export function truthy(val: any): boolean {
  * return the delta between two objects
  * @param lhs the left, "before", object
  * @param rhs the right, "after", object
+ * @param skip properties to skip in the diff, string array
  */
 export function objDiff(lhs: any, rhs: any, skip?: string[]): any {
   const res = {};
 
   if ((typeof(lhs) === 'object') && (typeof(rhs) === 'object')) {
     Object.keys(lhs || {}).forEach(key => {
-      if ((skip !== undefined) && (skip.indexOf(key) !== -1)) {
-        return;
+      if ((skip !== undefined) && Array.isArray(skip) && (skip.indexOf(key) !== -1)) {
+        return null;
       }
-      if (!rhs?.hasOwnProperty?.(key) && lhs?.hasOwnProperty?.(key)) {
+      if (!Object.prototype.hasOwnProperty.call(rhs, key)
+          && Object.prototype.hasOwnProperty.call(lhs, key)) {
         res['-' + key] = lhs[key];
       } else {
         const sub = objDiff(lhs?.[key] ?? {}, rhs?.[key] ?? {});
-        if (sub === null) {
+        if (sub === null || sub === undefined) {
           res['-' + key] = lhs?.[key] ?? null;
           res['+' + key] = rhs?.[key] ?? null;
         } else if (Object.keys(sub).length !== 0) {
@@ -121,7 +124,8 @@ export function objDiff(lhs: any, rhs: any, skip?: string[]): any {
       }
     });
     Object.keys(rhs || {}).forEach(key => {
-      if (!lhs?.hasOwnProperty?.(key) && rhs?.hasOwnProperty?.(key)) {
+      if (!Object.prototype.hasOwnProperty.call(lhs, key)
+          && Object.prototype.hasOwnProperty.call(rhs, key)) {
         res['+' + key] = rhs[key];
       }
     });
@@ -710,6 +714,7 @@ export function replaceRecursive(input: any, from: any, to: any) {
 }
 
 function removeLeadingZeros(input: string): string {
+  if (!input) { return input; }
   return input.split('.').map(seg => seg.replace(/^0+(\d+$)/, '$1')).join('.');
 }
 
@@ -802,32 +807,54 @@ export enum Section {
 }
 
 export enum Campaign {
-  ViewCollection = 'ViewCollection',
-  Collections = 'Collections',
-  DownloadsAd = 'Downloads-Ad',
-  DashboardAd = 'Dashboard-Ad',
+  ViewCollection = 'view_collection',
+  ViewCollectionAsCurator = 'curator_view_collection',
+  BuyPremium = 'buy_premium'
+}
+
+export enum Source {
+  HeaderAd = 'header_ad',
+  DownloadsBannerAd = 'downloads_banner_ad',
+  DownloadsNagAd = 'downloads_nag_ad',
+  DashboardAd = 'dashboard_ad',
+  CollectionsAd = 'collections_ad',
+  SettingsAd = 'settings_ad'
 }
 
 export interface INexusURLOptions {
   section?: Section;
+  source?: Source;
   campaign?: Campaign | string;
   parameters?: string[];
 }
 
 function sectionHost(section?: Section) {
   switch (section) {
-    case Section.Collections: return `next.${NEXUS_DOMAIN}`;
-    case Section.Users: return `users.${NEXUS_DOMAIN}`;
-    default: return `www.${NEXUS_DOMAIN}`;
+    case Section.Collections: return `${NEXUS_NEXT_SUBDOMAIN}.${NEXUS_DOMAIN}`;
+    case Section.Users: return `${NEXUS_USERS_SUBDOMAIN}.${NEXUS_DOMAIN}`;
+    default: return `${NEXUS_FLAMEWORK_SUBDOMAIN}.${NEXUS_DOMAIN}`;
   }
 }
 
 export function nexusModsURL(reqPath: string[], options?: INexusURLOptions): string {
-  const parameters = options?.parameters ?? [];
+
+  // if no parameters set, then just empty array to start
+  const parameters = options?.parameters ?? []; 
+  
+  // if we have a campaign, then we want to track some data  
   if (options?.campaign !== undefined) {
-    parameters.push(`pk_campaign=${options.campaign.toString()}`);
-    parameters.push('pk_source=vortex');
+
+    // always need this and will always be 'vortex'
+    parameters.push('utm_medium=vortex');
+
+    // source is location within vortex if we want to differenciate, if not, then just 'vortex' 
+    const source = options?.source ?? 'vortex'; 
+    parameters.push(`utm_source=${source}`);
+    
+    // we add the campaign
+    parameters.push(`utm_campaign=${options.campaign.toString()}`);
   }
+
   const urlParameters: url.UrlObject = {
     protocol: NEXUS_PROTOCOL,
     host: sectionHost(options?.section),
@@ -885,6 +912,9 @@ export class Overlayable<KeyT extends string | number | symbol, ObjT> {
     key: KeyT, attr: AttrT, extraArg?: any): ValT {
 
     const layer = this.mDeduce(key, extraArg);
+    if (layer === undefined) {
+      return this.mBaseData[key]?.[attr] as ValT;
+    }
     return (this.mLayers[layer]?.[key]?.[attr] as any)
         ?? this.mBaseData[key]?.[attr];
   }

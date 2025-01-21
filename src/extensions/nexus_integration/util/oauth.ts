@@ -1,6 +1,16 @@
+import { net } from 'electron';
+import * as http from 'node:http';
 import * as https from 'node:https';
+import { AddressInfo } from 'node:net';
 import * as querystring from 'node:querystring';
 import * as url from 'node:url';
+import { log } from '../../../util/log';
+import { OAUTH_REDIRECT_URL } from '../constants';
+import { inspect } from 'node:util';
+import VORTEX_ICON from './vortexicon';
+import NEXUSMODS_LOGO from './nexusmodslogo';
+import { ArgumentInvalid } from '../../../util/CustomErrors';
+import { IJWTAccessToken } from '../types/IJWTAccessToken';
 
 type TokenType = 'Bearer';
 
@@ -21,21 +31,78 @@ interface IOAuthServerSettings {
   redirectUrl: string;
 }
 
+/* eslint-disable max-len */
+function makeResultPage(success: boolean) {
+
+  var html = [];
+
+  html.push(
+    `<!DOCTYPE html>
+
+    <html lang="en">
+    
+    <head>
+    <title>Authentication Status</title>
+    
+      <meta http-equiv="refresh" content="6; url=http://www.nexusmods.com/" />
+    
+    </head>
+    
+    <body style="display: flex; flex-direction: column; height: 50vh; justify-content: center; align-items: center; background-color: black; font-family: sans-serif; color: white;">
+    
+    <div style="text-align: center; ">
+    
+    <img width="200px" src="data:image/png;base64,${NEXUSMODS_LOGO}" />`
+  );
+
+  if (success) {
+
+  html.push(`
+    <h1>Vortex log in successful!</h1>
+  `);
+
+  } else {
+
+  html.push(`
+    <h1>Vortex was unable to log in</h1>
+    <p style="font-size: 1.2em;">Please check Vortex for more information</a></p>
+  `);
+  }
+
+  html.push(`
+
+  <p style="font-size: 1.2em;">Taking you to the <a href="http://www.nexusmods.com/" style="color: #D98F40;">Nexus Mods homepage</a></p>
+    </div>
+    </body>
+    
+    </html>
+  `);
+
+  return html.join("");
+}
+/* eslint-enable max-len */
+
 /**
  * deals with token exchange for OAuth2
  **/
 class OAuth {
   private mVerifier: string;
   private mServerSettings: IOAuthServerSettings;
-  private mOnOpenPage: (url: string) => void;
   private mStates: { [state: string]: (err: Error, token: ITokenReply) => void } = {};
+  private mServer: http.Server;
+  private mLastServerPort: number;
+  private mLocalhost: boolean;
 
-  constructor(settings: IOAuthServerSettings, onOpenPage: (url: string) => void) {
+  constructor(settings: IOAuthServerSettings) {
     this.mServerSettings = settings;
-    this.mOnOpenPage = onOpenPage;
+    this.mLocalhost = url.parse(OAUTH_REDIRECT_URL).protocol === 'http:';
   }
 
-  public async sendRequest(onToken: (err: Error, token: ITokenReply) => void): Promise<void> {
+  public async sendRequest(
+    onToken: (err: Error, token: ITokenReply) => void,
+    onOpenPage: (url: string) => void)
+    : Promise<void> {
+
     // importing uuid can take significant amounts of time so always delay it as far as possible
     const uuid = (await import('uuid/v1')).default;
     const crypto = (await import('crypto')).default;
@@ -47,17 +114,120 @@ class OAuth {
     this.mVerifier = Buffer.from(uuid().replace(/-/g, '')).toString('base64');
     // see https://www.rfc-editor.org/rfc/rfc7636#section-4.2
     const challenge = crypto.createHash('sha256').update(this.mVerifier).digest('base64');
+
+    try {
+      this.mLastServerPort = this.mLocalhost ? await this.ensureServer() : -1;
+    } catch (err) {
+      log('error', 'failed to start server', err);
+      throw err;
+    }
+
     // see https://www.rfc-editor.org/rfc/rfc7636#section-4.3
-    this.mOnOpenPage(this.authorizeUrl(challenge, state));
+    const url = this.authorizeUrl(challenge, state);
+
+    // call callback with generated url
+    onOpenPage(url);
   }
 
-  public async receiveCode(code: string, state: string): Promise<void> {
-    try {
-      const tokenReply = await this.sentAuthorizeToken(code)
-      this.mStates[state]?.(null, tokenReply);
-    } catch (err) {
-      this.mStates[state]?.(err, undefined);
+  public async receiveCode(code: string, state?: string): Promise<void> {
+    if (state === undefined) {
+      for (const key of Object.keys(this.mStates)) {
+        await this.receiveCode(code, key);
+      }
+    } else {
+      if (this.mStates[state] === undefined) {
+        throw new ArgumentInvalid('unexpected authorize token');
+      }
+      try {
+        const tokenReply = await this.sentAuthorizeToken(code)
+        this.mStates[state]?.(null, tokenReply);
+      } catch (err) {
+        this.mStates[state]?.(err, undefined);
+      }
+      delete this.mStates[state];
     }
+  }
+
+  private async ensureServer(): Promise<number> {
+    if (this.mServer === undefined) {
+      log('info', 'starting localhost server to receive oauth response');
+      await this.startServer();
+    }
+    const addr: AddressInfo = this.mServer.address() as AddressInfo;
+    log('info', 'using localhost server for oauth response', { port: addr.port });
+    return addr.port;
+  }
+
+  private checkServerStillRequired() {
+    if (this.mLocalhost && (Object.keys(this.mStates).length === 0)) {
+      log('info', 'no more oauth responses outstanding, stopping server');
+      this.stopServer();
+    }
+  }
+
+  private stopServer() {
+    this.mServer?.close?.();
+    this.mServer = undefined;
+  }
+
+  private async startServer(): Promise<void> {
+    return new Promise<void>((resolve, reject) => {
+      try {
+        this.mServer = http.createServer()
+          .listen(undefined, '127.0.0.1')
+          .on('error', reject)
+          .on('listening', resolve)
+          .on('request', (req, resp) => {
+            this.onHTTPRequest(req, resp);
+          });
+      } catch (err) {
+        reject(err);
+      }
+    });
+  }
+
+  private onHTTPRequest(
+    req: http.IncomingMessage,
+    resp: http.ServerResponse<http.IncomingMessage> & { req: http.IncomingMessage; }) {
+
+    const queryItems = url.parse(req.url, true).query;
+    const getQueryParam = (key: string): string => {
+      const tmp = queryItems[key];
+      return Array.isArray(tmp) ? tmp[0] : tmp;
+    };
+    const code = getQueryParam('code');
+    const state = getQueryParam('state');
+    const error = getQueryParam('error');
+    const error_description = getQueryParam('error_description');
+
+    req.setEncoding('utf-8');
+    let msg: string = '';
+    req
+      .on('data', chunk => { msg += chunk; });
+
+
+    if ((code !== undefined) && (state !== undefined)) {
+      (async () => {
+        try {
+          await this.receiveCode(code, state as string);
+        } catch (err) {
+          // ignore unexpected codes
+        }
+      })();
+      resp.write(makeResultPage(true));
+
+      this.checkServerStillRequired();
+    } else if (error !== undefined) {
+      const err = new Error((error_description as string) ?? 'Description missing');
+      err['code'] = error;
+      this.mStates[state]?.(err, undefined);
+      resp.write(makeResultPage(false)); 
+      delete this.mStates[state];
+
+      this.checkServerStillRequired();
+    }
+
+    resp.end();
   }
 
   private async postRequest(tokenUrl: string, request: any): Promise<string> {
@@ -116,10 +286,10 @@ class OAuth {
   private authorizeUrl(challenge: string, state: string): string {
     const request = {
       response_type: 'code',
-      scope: 'public',
+      scope: 'openid profile email',
       code_challenge_method: 'S256',
       client_id: this.mServerSettings.clientId,
-      redirect_uri: this.mServerSettings.redirectUrl,
+      redirect_uri: this.mServerSettings.redirectUrl.replace('PORT', this.mLastServerPort.toString()),
       state,
       code_challenge: OAuth.sanitizeBase64(challenge),
     };
@@ -130,7 +300,7 @@ class OAuth {
     const request = {
       grant_type: 'authorization_code',
       client_id: this.mServerSettings.clientId,
-      redirect_uri: this.mServerSettings.redirectUrl,
+      redirect_uri: this.mServerSettings.redirectUrl.replace('PORT', this.mLastServerPort.toString()),
       code,
       code_verifier: this.mVerifier,
     };

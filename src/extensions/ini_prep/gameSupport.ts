@@ -78,6 +78,14 @@ const gameSupport = makeOverlayableDictionary<string, IGameSupport>({
     ],
     iniFormat: 'winapi',
   },
+  starfield: {
+    iniFiles: [
+      path.join('{mygames}', 'Starfield', 'Starfield.ini'),
+      path.join('{mygames}', 'Starfield', 'StarfieldPrefs.ini'),
+      path.join('{mygames}', 'Starfield', 'StarfieldCustom.ini'),
+    ],
+    iniFormat: 'winapi',
+  },
   oblivion: {
     iniFiles: [
       path.join('{mygames}', 'Oblivion', 'Oblivion.ini'),
@@ -100,6 +108,13 @@ const gameSupport = makeOverlayableDictionary<string, IGameSupport>({
       ],
       iniFormat: 'winapi',
     },
+    enderalspecialedition: {
+      iniFiles: [
+        path.join('{mygames}', 'Enderal Special Edition GOG', 'Enderal.ini'),
+        path.join('{mygames}', 'Enderal Special Edition GOG', 'EnderalPrefs.ini'),
+      ],
+      iniFormat: 'winapi',
+    }
   },
   epic: {
     skyrimse: {
@@ -110,6 +125,14 @@ const gameSupport = makeOverlayableDictionary<string, IGameSupport>({
       ],
       iniFormat: 'winapi',
     },
+    fallout4: {
+      iniFiles: [
+        path.join('{mygames}', 'Fallout4 EPIC', 'Fallout4.ini'),
+        path.join('{mygames}', 'Fallout4 EPIC', 'Fallout4Prefs.ini'),
+        path.join('{mygames}', 'Fallout4 EPIC', 'Fallout4Custom.ini'),
+      ],
+      iniFormat: 'winapi',
+    }
   },
   xbox: {
     skyrimse: {

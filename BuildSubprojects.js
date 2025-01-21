@@ -80,7 +80,7 @@ function spawnAsync(exe, args, options, out) {
     let desc = `${options.cwd || '.'}/${exe} ${args.join(' ')}`;
     out.log('started: ' + desc);
     try {
-      let proc = spawn(exe, args, options);
+      let proc = spawn(exe, args, { ...options, shell: true });
       proc.stdout.on('data', (data) => out.log(data.toString()));
       proc.stderr.on('data', (data) => out.err(data.toString()));
       proc.on('error', (err) => reject(err));
@@ -128,7 +128,7 @@ function changes(basePath, patterns, force) {
 
 function format(fmt, parameters) {
   return fmt.replace(/{([a-zA-Z_]+)}/g, (match, key) => {
-    return typeof parameters[key] !== undefined ? parameters[key] : match;
+    return typeof parameters[key] !== 'undefined' ? parameters[key] : match;
   });
 }
 
@@ -183,30 +183,6 @@ function processCustom(project, buildType, feedback, noparallel) {
   })
   return res;
 }
-
-/*
-function processRebuild(project, buildType, feedback) {
-  const moduleDir = buildType === 'out'
-    ? __dirname
-    : path.join(__dirname, buildType);
-
-  return rebuild({
-    buildPath: moduleDir,
-    electronVersion: packageJSON.vortex.electron,
-    arch: process.arch,
-    onlyModules: [project.module],
-    force: true,
-  })
-    .then(() => {
-      if (project.name !== undefined) {
-        feedback.log('electron-rebuild process finished: ' + project.name);
-      }
-    })
-    .catch((err) => {
-        feedback.err('An error occurred during the electron-rebuild process: ' + err);
-    });
-}
-*/
 
 function evalCondition(condition, context) {
   if (condition === undefined) {
@@ -286,7 +262,7 @@ function main(args) {
           }
         })
         ;
-  }, { concurrency: 4 }))
+  }, { concurrency: 1 }))
   .then(() => failed ? 1 : 0);
 }
 

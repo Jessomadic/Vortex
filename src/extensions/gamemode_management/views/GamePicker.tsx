@@ -16,7 +16,6 @@ import { truthy } from '../../../util/util';
 import MainPage from '../../../views/MainPage';
 
 import { IAvailableExtension, IExtension } from '../../extension_manager/types';
-import { NEXUS_DOMAIN } from '../../nexus_integration/constants';
 import { nexusGameId } from '../../nexus_integration/util/convertGameId';
 import { IProfile } from '../../profile_management/types/IProfile';
 
@@ -335,9 +334,9 @@ class GamePicker extends ComponentEx<IProps, IComponentState> {
                           <Select
                             className='select-compact'
                             options={[
+                              { value: 'popular', label: t('Most Popular') },
                               { value: 'alphabetical', label: t('Name A-Z') },
                               { value: 'recent', label: t('Most Recent') },
-                              { value: 'popular', label: t('Most Popular') },
                             ]}
                             value={sortUnmanaged}
                             onChange={this.setSortUnmanaged}

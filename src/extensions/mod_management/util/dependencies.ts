@@ -1,4 +1,5 @@
-import {IExtensionApi} from '../../../types/IExtensionContext';
+/* eslint-disable */
+import { IExtensionApi } from '../../../types/IExtensionContext';
 import { IDownload } from '../../../types/IState';
 import { NotFound, ProcessCanceled, UserCanceled } from '../../../util/CustomErrors';
 
@@ -6,15 +7,15 @@ import { IDependency, ILookupResultEx } from '../types/IDependency';
 import { IDownloadHint, IFileListItem, IMod, IModReference, IModRule } from '../types/IMod';
 
 import ConcurrencyLimiter from '../../../util/ConcurrencyLimiter';
-import {log} from '../../../util/log';
-import {activeGameId, lastActiveProfileForGame} from '../../../util/selectors';
-import {getSafe} from '../../../util/storeHelper';
+import { log } from '../../../util/log';
+import { activeGameId, lastActiveProfileForGame } from '../../../util/selectors';
+import { getSafe } from '../../../util/storeHelper';
 import { semverCoerce, truthy } from '../../../util/util';
 
 import Promise from 'bluebird';
 import * as _ from 'lodash';
 import minimatch from 'minimatch';
-import {ILookupResult, IReference, IRule} from 'modmeta-db';
+import { ILookupResult, IReference, IRule } from 'modmeta-db';
 import normalizeUrl from 'normalize-url';
 import * as semver from 'semver';
 import testModReference, { IModLookupInfo, isFuzzyVersion } from './testModReference';
@@ -25,19 +26,19 @@ interface IBrowserResult {
 }
 
 export function findModByRef(reference: IModReference, mods: { [modId: string]: IMod },
-                             source?: { gameId: string, modId: string }): IMod {
+  source?: { gameId: string, modId: string }): IMod {
   const fuzzy = isFuzzyVersion(reference.versionMatch);
   if ((reference['idHint'] !== undefined)
-      && (testModReference(mods[reference['idHint']], reference, source, fuzzy))) {
+    && (testModReference(mods[reference['idHint']], reference, source, fuzzy))) {
     // fast-path if we have an id from a previous match
     return mods[reference['idHint']];
   }
 
   if ((reference.versionMatch !== undefined)
-      && isFuzzyVersion(reference.versionMatch)
-      && (reference.fileMD5 !== undefined)
-      && ((reference.logicalFileName !== undefined)
-          || (reference.fileExpression !== undefined))) {
+    && isFuzzyVersion(reference.versionMatch)
+    && (reference.fileMD5 !== undefined)
+    && ((reference.logicalFileName !== undefined)
+      || (reference.fileExpression !== undefined))) {
     reference = {
       md5Hint: reference.fileMD5,
       ...reference,
@@ -45,7 +46,10 @@ export function findModByRef(reference: IModReference, mods: { [modId: string]: 
     delete reference.fileMD5;
   }
 
-  if (reference['md5Hint'] !== undefined) {
+  if (reference['md5Hint'] !== undefined
+    && reference.installerChoices === undefined
+    && reference.patches === undefined
+    && reference.fileList === undefined) {
     const result = Object.keys(mods)
       .find(dlId => mods[dlId].attributes?.fileMD5 === reference['md5Hint']);
     if (result !== undefined) {
@@ -69,9 +73,9 @@ function newerSort(lhs: IDownload, rhs: IDownload): number {
 }
 
 function browseForDownload(api: IExtensionApi,
-                           url: string,
-                           instruction: string)
-                           : Promise<IBrowserResult> {
+  url: string,
+  instruction: string)
+  : Promise<IBrowserResult> {
   return new Promise((resolve, reject) => {
     let lookupResult: Promise<{ url: string, referer: string }>;
 
@@ -106,8 +110,8 @@ function browseForDownload(api: IExtensionApi,
 }
 
 function lookupDownloadHint(api: IExtensionApi,
-                            input: IDownloadHint)
-                            : Promise<IBrowserResult> {
+  input: IDownloadHint)
+  : Promise<IBrowserResult> {
   if (input === undefined) {
     return Promise.resolve(undefined);
   }
@@ -169,13 +173,13 @@ function lookupFulfills(lookup: ILookupResult, reference: IReference) {
   }
   const { value } = lookup;
   return ((gameId === undefined) || (gameId === value.gameId))
-      && ((fileMD5 === undefined) || (fileMD5 === value.fileMD5))
-      && ((fileSize === undefined) || (fileSize === value.fileSizeBytes))
-      && ((logicalFileName === undefined) || (logicalFileName === value.logicalFileName))
-      && ((fileExpression === undefined)
-          || ((value.fileName !== undefined) && minimatch(value.fileName, fileExpression)))
-      && ((versionMatch === undefined)
-          || semver.satisfies(semver.coerce(value.fileVersion), versionMatch));
+    && ((fileMD5 === undefined) || (fileMD5 === value.fileMD5))
+    && ((fileSize === undefined) || (fileSize === value.fileSizeBytes))
+    && ((logicalFileName === undefined) || (logicalFileName === value.logicalFileName))
+    && ((fileExpression === undefined)
+      || ((value.fileName !== undefined) && minimatch(value.fileName, fileExpression)))
+    && ((versionMatch === undefined)
+      || semver.satisfies(semver.coerce(value.fileVersion), versionMatch));
 }
 
 function tagDuplicates(input: IDependencyNode[]): Promise<IDependencyNode[]> {
@@ -198,9 +202,9 @@ function tagDuplicates(input: IDependencyNode[]): Promise<IDependencyNode[]> {
         const fileVerL = lhs.dep.lookupResults[0]?.value?.fileVersion ?? '0.0.1';
         const fileVerR = rhs.dep.lookupResults[0]?.value?.fileVersion ?? '0.0.1';
         try {
-        // within blocks of equal number of collaterals, consider the newer versions
-        // before the ones with lower version
-        return semver.compare(semverCoerce(fileVerR), semverCoerce(fileVerL));
+          // within blocks of equal number of collaterals, consider the newer versions
+          // before the ones with lower version
+          return semver.compare(semverCoerce(fileVerR), semverCoerce(fileVerL));
         } catch (err) {
           log('error', 'failed to compare version', { lhs: fileVerL, rhs: fileVerR });
           return fileVerR.localeCompare(fileVerL);
@@ -238,12 +242,12 @@ export function lookupFromDownload(download: IDownload): IModLookupInfo {
   // the modid/fileid may be stored in differenent places).
   // Newer versions should be more consistent but existing downloads may still be messy
   const modId = download.modInfo?.meta?.details?.modId
-              ?? download.modInfo?.nexus?.ids?.modId
-              ?? download.modInfo?.ids?.modId;
+    ?? download.modInfo?.nexus?.ids?.modId
+    ?? download.modInfo?.ids?.modId;
 
   const fileId = download.modInfo?.meta?.details?.fileId
-              ?? download.modInfo?.nexus?.ids?.fileId
-              ?? download.modInfo?.ids?.fileId;
+    ?? download.modInfo?.nexus?.ids?.fileId
+    ?? download.modInfo?.ids?.fileId;
 
   return {
     fileMD5: download.fileMD5,
@@ -260,7 +264,7 @@ export function lookupFromDownload(download: IDownload): IModLookupInfo {
 }
 
 export function findDownloadByRef(reference: IReference,
-                                  downloads: { [dlId: string]: IDownload }): string {
+  downloads: { [dlId: string]: IDownload }): string {
   if (reference['md5Hint'] !== undefined) {
     const result = Object.keys(downloads)
       .find(dlId => downloads[dlId].fileMD5 === reference['md5Hint']);
@@ -298,6 +302,7 @@ interface IDependencyNode extends IDependency {
   redundant: boolean;
   fileList?: IFileListItem[];
   installerChoices?: any;
+  patches?: any;
   reresolveDownloadHint?: () => void;
 }
 
@@ -314,7 +319,13 @@ function gatherDependenciesGraph(
     log('debug', 'no download found', { ref: JSON.stringify(rule.reference) });
   }
 
-  const mod = findModByRef(rule.reference, state.persistent.mods[gameMode] ?? {});
+  const modReference: IModReference = {
+    ...rule.reference,
+    fileList: rule.fileList,
+    patches: rule.extra?.patches ?? {},
+    installerChoices: rule.installerChoices ?? {},
+  }
+  const mod = findModByRef(modReference, state.persistent.mods[gameMode] ?? {});
 
   let lookupResults: ILookupResult[];
 
@@ -323,8 +334,8 @@ function gatherDependenciesGraph(
   const limit = new ConcurrencyLimiter(10);
 
   return ((download !== undefined)
-              ? Promise.resolve(undefined)
-              : lookupDownloadHint(api, rule.downloadHint))
+    ? Promise.resolve(undefined)
+    : lookupDownloadHint(api, rule.downloadHint))
     .then(res => {
       urlFromHint = truthy(res) ? res : undefined;
       if (res !== undefined) {
@@ -352,6 +363,7 @@ function gatherDependenciesGraph(
         dependencies: nodes.filter(node => node !== null),
         redundant: false,
         extra: rule.extra,
+        patches: rule.extra?.patches ?? {},
         installerChoices: rule.installerChoices,
         fileList: rule.fileList,
         phase: rule.extra?.['phase'] ?? 0,
@@ -377,7 +389,7 @@ function gatherDependenciesGraph(
         });
       }
       if ((urlFromHint !== undefined)
-          && (rule.downloadHint?.mode === 'browse')) {
+        && (rule.downloadHint?.mode === 'browse')) {
         // user might have selected the wrong download link which we'll only notice
         // once the file has actually been downloaded - which may be hours from now.
         // This gives us a way to re-query the download url
@@ -393,7 +405,7 @@ function gatherDependenciesGraph(
             });
         };
       }
-      return res;
+      return Promise.resolve(res);
     })
     .catch(err => {
       if (!(err instanceof ProcessCanceled)) {
@@ -402,9 +414,9 @@ function gatherDependenciesGraph(
           message: rule.downloadHint?.url ?? rule.comment ?? rule.reference.description,
         });
         log('error', 'failed to look up',
-            { rule: JSON.stringify(rule), ex: err.name, message: err.message, stack: err.stack });
+          { rule: JSON.stringify(rule), ex: err.name, message: err.message, stack: err.stack });
       }
-      return null;
+      return Promise.resolve(null);
     });
 }
 
@@ -449,15 +461,18 @@ function gatherDependencies(
   const limit = new ConcurrencyLimiter(20);
 
   // for each requirement, look up the reference and recursively their dependencies
-  return Promise.all(
-    requirements
-      .map((rule: IModRule) =>
-        Promise.resolve(limit.do(() =>
-          gatherDependenciesGraph(rule, api, gameMode, recommendations)))
-        .then((node: IDependencyNode) => {
-          onProgress();
-          return node;
-        })),
+  return Promise.all(requirements.map((rule: IModRule) => Promise.resolve(limit.do(() =>
+    gatherDependenciesGraph(rule, api, gameMode, recommendations)))
+    .then((node: IDependencyNode) => {
+      onProgress();
+      return Promise.resolve(node);
+    })
+    .catch(err => {
+      // gatherDependenciesGraph handles exceptions itself so we shouldn't get here
+      // but better to make sure
+      api.showErrorNotification('Failed to gather dependencies', err);
+      return Promise.resolve(null);
+    })),
   )
     // tag duplicates
     .then((nodes: IDependencyNode[]) =>

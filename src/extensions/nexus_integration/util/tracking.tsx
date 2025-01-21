@@ -230,7 +230,7 @@ class Tracking {
     return this.mNexus
       .untrackMod(nexusModId, nexusId)
       .then(() => {
-        this.mTrackedMods[nexusId].delete(nexusModId);
+        this.mTrackedMods[nexusId]?.delete?.(nexusModId);
         this.mOnChanged?.();
       })
       .catch((err: Error) => {
@@ -238,7 +238,7 @@ class Tracking {
           // user isn't actually tracking the mod
           log('warn', 'mod tracking state out of sync between server and Vortex',
             { game: nexusId, modId: nexusModId });
-          this.mTrackedMods[nexusId].delete(nexusModId);
+          this.mTrackedMods[nexusId]?.delete?.(nexusModId);
           this.mOnChanged?.();
         } else {
           this.mApi.showErrorNotification('Failed to track/untrack mod', err);

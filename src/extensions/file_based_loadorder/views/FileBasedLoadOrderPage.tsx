@@ -1,3 +1,4 @@
+/* eslint-disable */
 import * as _ from 'lodash';
 import * as React from 'react';
 import { Panel } from 'react-bootstrap';
@@ -11,12 +12,15 @@ import * as util from '../../../util/api';
 import { ComponentEx } from '../../../util/ComponentEx';
 import * as selectors from '../../../util/selectors';
 import { DNDContainer, MainPage } from '../../../views/api';
+import FilterBox from './FilterBox';
 
 import { setFBLoadOrder } from '../actions/loadOrder';
 import { IItemRendererProps, ILoadOrderGameInfo, LoadOrder,
   LoadOrderValidationError } from '../types/types';
 import InfoPanel from './InfoPanel';
 import ItemRenderer from './ItemRenderer';
+import { setFBForceUpdate } from '../actions/session';
+import ToolbarDropdown from '../../../controls/ToolbarDropdown';
 
 const PanelX: any = Panel;
 
@@ -24,10 +28,15 @@ interface IBaseState {
   loading: boolean;
   updating: boolean;
   validationError: LoadOrderValidationError;
+  currentRefreshId: string;
+  filterText: string;
 }
 
 export interface IBaseProps {
   getGameEntry: (gameId: string) => ILoadOrderGameInfo;
+  onImportList: () => void;
+  onExportList: () => void;
+  onSetOrder: (profileId: string, loadOrder: LoadOrder, refresh?: boolean) => void;
   onStartUp: (gameMode: string) => Promise<LoadOrder>;
   onShowError: (gameId: string, error: Error) => void;
   validateLoadOrder: (profile: types.IProfile, newLO: LoadOrder) => Promise<void>;
@@ -42,11 +51,20 @@ interface IConnectedProps {
 
   // Does the user need to deploy ?
   needToDeploy: boolean;
+
+  // The refresh id for the current profile
+  //  (used to force a refresh of the list)
+  refreshId: string;
+
+  validationResult: types.IValidationResult;
+
+  // Allow dnd operations?
+  disabled: boolean;
 }
 
 interface IActionProps {
   onSetDeploymentNecessary: (gameId: string, necessary: boolean) => void;
-  onSetOrder: (profileId: string, loadOrder: LoadOrder) => void;
+  onForceRefresh: (profileId: string) => void;
 }
 
 type IProps = IActionProps & IBaseProps & IConnectedProps;
@@ -61,6 +79,8 @@ class FileBasedLoadOrderPage extends ComponentEx<IProps, IComponentState> {
       loading: true,
       updating: false,
       validationError: undefined,
+      currentRefreshId: '',
+      filterText: '',
     });
 
     this.mStaticButtons = [
@@ -73,7 +93,11 @@ class FileBasedLoadOrderPage extends ComponentEx<IProps, IComponentState> {
             icon: 'deploy',
             text: 'Deploy Mods',
             className: this.props.needToDeploy ? 'toolbar-flash-button' : undefined,
-            onClick: () => this.context.api.events.emit('deploy-mods', () => undefined),
+            onClick: async () => {
+              await util.toPromise(cb => this.context.api.events.emit('deploy-mods', cb));
+              const gameId = selectors.activeGameId(this.context.api.getState());
+              this.props.onSetDeploymentNecessary(gameId, false);
+            },
           };
         },
       }, {
@@ -85,7 +109,11 @@ class FileBasedLoadOrderPage extends ComponentEx<IProps, IComponentState> {
             icon: 'purge',
             text: 'Purge Mods',
             className: 'load-order-purge-list',
-            onClick: () => this.context.api.events.emit('purge-mods', false, () => undefined),
+            onClick: async () => {
+              await util.toPromise(cb => this.context.api.events.emit('purge-mods', false, cb));
+              const gameId = selectors.activeGameId(this.context.api.getState());
+              this.props.onSetDeploymentNecessary(gameId, true);
+            },
           };
         },
       }, {
@@ -100,8 +128,47 @@ class FileBasedLoadOrderPage extends ComponentEx<IProps, IComponentState> {
             onClick: this.onRefreshList,
           };
         },
-      },
+      }, {
+        component: ToolbarDropdown,
+        props: () => {
+          return {
+            t: this.props.t,
+            key: 'btn-import-export-list',
+            id: 'btn-import-export-list',
+            instanceId: [],
+            icons: [
+            {
+              icon: (this.state.updating || this.props.disabled) ? 'spinner' : 'import',
+              title: 'Load Order Import',
+              action: this.props.onImportList,
+              default: true,
+            }, {
+              icon: (this.state.updating || this.props.disabled) ? 'spinner' : 'import',
+              title: 'Load Order Export',
+              action: this.props.onExportList,
+            }]
+          }
+        }
+      }
     ];
+  }
+
+  public UNSAFE_componentWillReceiveProps(newProps: IProps) {
+    // Zuckerberg isn't going to like this...
+    if (!!newProps.refreshId && this.state.currentRefreshId !== newProps.refreshId) {
+      this.nextState.currentRefreshId = newProps.refreshId;
+      this.onRefreshList();
+      return;
+    }
+
+    if (this.state.validationError !== undefined && newProps.validationResult === undefined) {
+      this.nextState.validationError = undefined;
+      return;
+    }
+
+    if ((this.state.validationError?.validationResult?.invalid) !== newProps.validationResult?.invalid) {
+      this.nextState.validationError = new LoadOrderValidationError(newProps.validationResult, newProps.loadOrder);
+    }
   }
 
   public componentDidMount() {
@@ -133,6 +200,7 @@ class FileBasedLoadOrderPage extends ComponentEx<IProps, IComponentState> {
     const { t, loadOrder, getGameEntry, profile } = this.props;
     const { validationError } = this.state;
     const gameEntry = getGameEntry(profile?.gameId);
+    const chosenItemRenderer = gameEntry.customItemRenderer ?? ItemRenderer;
     const enabled = (gameEntry !== undefined)
       ? loadOrder.reduce((accum, loEntry) => {
           const rendOps: IItemRendererProps = {
@@ -140,7 +208,10 @@ class FileBasedLoadOrderPage extends ComponentEx<IProps, IComponentState> {
             displayCheckboxes: gameEntry.toggleableEntries || false,
             invalidEntries: validationError?.validationResult?.invalid,
           };
-          accum.push(rendOps);
+          // Filter based on the filterText, matching on loEntry.name or other attributes as needed
+          if (loEntry.name.toLowerCase().includes(this.state.filterText.toLowerCase())) {
+            accum.push(rendOps);
+          }
           return accum;
         }, [])
       : [];
@@ -151,14 +222,15 @@ class FileBasedLoadOrderPage extends ComponentEx<IProps, IComponentState> {
         info={gameEntry?.usageInstructions}
       />;
 
-    const draggableList = () => (this.nextState.loading)
+    const draggableList = () => (this.nextState.loading || this.nextState.updating)
       ? this.renderWait()
       : (enabled.length > 0)
         ? <DraggableList
+            disabled={this.props.disabled || this.state.filterText !== ''}
             itemTypeId='file-based-lo-draggable-entry'
             id='mod-loadorder-draggable-list'
             items={enabled}
-            itemRenderer={ItemRenderer}
+            itemRenderer={chosenItemRenderer}
             apply={this.onApply}
             idFunc={this.getItemId}
             isLocked={this.isLocked}
@@ -169,7 +241,7 @@ class FileBasedLoadOrderPage extends ComponentEx<IProps, IComponentState> {
             text={t('You don\'t have any orderable entries')}
             subtext={t('Please make sure to deploy')}
         />;
-
+    const listClasses = this.props.disabled ? ['file-based-load-order-list', 'disabled'] : ['file-based-load-order-list'];
     return (
       <MainPage>
         <MainPage.Header>
@@ -183,9 +255,10 @@ class FileBasedLoadOrderPage extends ComponentEx<IProps, IComponentState> {
         <MainPage.Body>
           <Panel>
             <PanelX.Body>
+              <FilterBox currentFilterValue={this.state.filterText} setFilter={this.onFilter} />
               <DNDContainer style={{ height: '100%' }}>
-                <FlexLayout type='row'>
-                  <FlexLayout.Flex className='file-based-load-order-list'>
+                <FlexLayout type='row' className='file-based-load-order-container'>
+                  <FlexLayout.Flex className={listClasses.join(' ')}>
                     {draggableList()}
                   </FlexLayout.Flex>
                   <FlexLayout.Flex>
@@ -205,24 +278,33 @@ class FileBasedLoadOrderPage extends ComponentEx<IProps, IComponentState> {
     this.nextState.validationError = undefined;
   }
 
+  private onFilter = (filterText: string) => this.nextState.filterText = filterText;
+
   private renderWait() {
     return (
-      <Spinner
-        style={{
-          width: '64px',
-          height: '64px',
-        }}
-      />
+      <div className='fblo-spinner-container'>
+        <Spinner className='file-based-load-order-spinner'/>
+      </div>
     );
   }
 
   private getItemId = (item: IItemRendererProps): string => item.loEntry.id;
 
   private isLocked = (item: IItemRendererProps): boolean => {
-    return [true, 'true', 'always'].includes(item.loEntry.locked);
+    return [true, 'true', 'always'].includes(item?.loEntry?.locked);
   }
 
   private onApply = (ordered: IItemRendererProps[]) => {
+    const { t } = this.props;
+    if (this.state.filterText !== '') {
+      this.context.api.sendNotification({
+        type: 'warning',
+        message: t('Must clear filter to apply changes'),
+        allowSuppress: true,
+        id: 'fblo-filter-not-cleared',
+      });
+      return;
+    }
     const { onSetOrder, onShowError, loadOrder, profile, validateLoadOrder } = this.props;
     const newLO = ordered.map(item => item.loEntry);
     validateLoadOrder(profile, newLO)
@@ -246,12 +328,12 @@ class FileBasedLoadOrderPage extends ComponentEx<IProps, IComponentState> {
     onStartUp(profile?.gameId)
       .then(lo => {
         this.nextState.validationError = undefined;
-        onSetOrder(profile.id, lo);
+        onSetOrder(profile.id, lo, true);
       })
       .catch(err => {
         if (err instanceof LoadOrderValidationError) {
           this.nextState.validationError = err as LoadOrderValidationError;
-          onSetOrder(profile.id, err.loadOrder);
+          onSetOrder(profile.id, err.loadOrder, true);
         }
       })
       .finally(() => this.nextState.updating = false);
@@ -268,17 +350,28 @@ function mapStateToProps(state: types.IState, ownProps: IProps): IConnectedProps
     loadOrder,
     profile,
     needToDeploy: selectors.needToDeploy(state),
+    refreshId: util.getSafe(state, ['session', 'fblo', 'refresh', profile?.id], ''),
+    validationResult: util.getSafe(state, ['session', 'fblo', 'validationResult', profile?.id], undefined),
+    disabled: shouldSuppressUpdate(state),
   };
 }
 
 function mapDispatchToProps(dispatch: any): IActionProps {
   return {
-    onSetDeploymentNecessary: (gameId, necessary) =>
+    onSetDeploymentNecessary: (gameId: string, necessary: boolean) =>
       dispatch(actions.setDeploymentNecessary(gameId, necessary)),
-    onSetOrder: (profileId, loadOrder) => {
-      dispatch(setFBLoadOrder(profileId, loadOrder));
+    onForceRefresh: (profileId: string) => {
+      dispatch(setFBForceUpdate(profileId))
     },
   };
+}
+
+function shouldSuppressUpdate(state: types.IState) {
+  const suppressOnActivities = ['deployment', 'purging', 'installing_dependencies'];
+  const isActivityRunning = (activity: string) =>
+    util.getSafe(state, ['session', 'base', 'activity', 'mods'], []).includes(activity) // purge/deploy
+    || util.getSafe(state, ['session', 'base', 'activity', activity], []).length > 0; // installing_dependencies
+  return suppressOnActivities.some(activity => isActivityRunning(activity));
 }
 
 export default withTranslation(['common'])(

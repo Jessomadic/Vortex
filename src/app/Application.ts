@@ -126,7 +126,6 @@ class Application {
     this.mArgs = args;
 
     ipcMain.on('show-window', () => this.showMainWindow(args?.startMinimized));
-
     process.env['UV_THREADPOOL_SIZE'] = (os.cpus().length * 1.5).toString();
     app.commandLine.appendSwitch('js-flags', `--max-old-space-size=${args.maxMemory || 4096}`);
 
@@ -484,6 +483,27 @@ class Application {
   }
 
   private identifyInstallType(): Promise<void> {
+
+    /**
+     * we are checking to see if an uninstaller exists as if it does, it means it was installed via our installer.
+     * if it doesn't, then something else installed it. Maybe GOG, or EPIC, or something.
+     * 
+     * TODO: we want to further check managed types to distiguish between anything that isn't us.
+     * Quick research says we need to file pattern match the install directory to see what files gog or epic adds etc.
+     * This should determine where it's from
+     * 
+     * GOG 
+     * 
+     * Maybe the existance of: (the number being the gog product id)
+     * 'goggame-galaxyFileList.ini'
+     * 'goggame-2053394557.info'
+     * 'goggame-2053394557.hashdb'
+     * 
+     * EPIC
+     * 
+     * 
+     */
+
     return fs.statAsync(path.join(getVortexPath('application'), 'Uninstall Vortex.exe'))
       .then(() => {
         this.mStore.dispatch(setInstallType('regular'));
@@ -507,19 +527,13 @@ class Application {
         return this.isUACEnabled().then(uacEnabled => dialog.showMessageBox(getVisibleWindow(), {
             title: 'Admin rights detected',
             message:
-              'Vortex is not intended to be run as administrator!\n'
-              + 'If you\'re doing this because you have permission problems, please '
-              + 'stop, you\'re just making it worse.\n'
-              + 'File permissions can be changed, so that the tools can be run with a '
-              + 'regular account. '
-              + 'Vortex will try its best to help you with that.\n'
-              + 'If you choose to continue I won\'t bother you again but please '
-              + 'don\'t report any permission problems to us because they are '
-              + 'of your own making.'
+              `Vortex has detected that it is being run with administrator rights. It is strongly 
+              advised to not run any application with admin rights as adverse effects may include 
+              permission issues or even security risks. Continue at your own risk`
               + (!uacEnabled
-                  ? '\n\nPlease note: User Account Control(UAC) notifications are disabled '
-                    + 'on your device; we strongly recommend you re-enable these to avoid '
-                    + 'file permissions issues.'
+                  ? `\n\nPlease note: User Account Control (UAC) notifications are disabled in your 
+                  operating system.  We strongly recommend you re-enable these to avoid file permissions 
+                  issues and potential security risks.`
                   : ''),
             buttons: [
               'Quit',
@@ -549,23 +563,22 @@ class Application {
   private migrateIfNecessary(currentVersion: string): Promise<void> {
     const state: IState = this.mStore.getState();
     const lastVersion = state.app.appVersion || '0.0.0';
-    if (this.mFirstStart || (currentVersion === '0.0.1')) {
+
+    if (this.mFirstStart || (process.env.NODE_ENV === 'development')) {
       // don't check version change in development builds or on first start
       return Promise.resolve();
-    }
+    } 
+
     if (isMajorDowngrade(lastVersion, currentVersion)) {
       if (dialog.showMessageBoxSync(getVisibleWindow(), {
         type: 'warning',
         title: 'Downgrade detected',
-        message: `The version of Vortex you\'re running (${currentVersion}) `
-               + `is older than the one you previously ran (${lastVersion}). `
-               + 'While Vortex versions are backward compatible they are not forward compatible, '
-               + 'it\'s possible this version of Vortex may not run and may even '
-               + 'do irrevsible damage to your application state.\n'
-               + 'Only continue if you\'re happy to reinstall and cleanup everything manually.',
+        message: `You're using a version of Vortex that is older than the version you ran previously. 
+        Active version: (${currentVersion}) Previously run: (${lastVersion}). Continuing to run this 
+        older version may cause irreversible damage to your application state and setup. Continue at your own risk. `,
         buttons: [
           'Quit',
-          'Yes, I\'m mad',
+          'Continue at your own risk',
         ],
         noLink: true,
       }) === 0) {
@@ -993,6 +1006,7 @@ class Application {
   }
 
   private sanityCheckCB = (err: StateError) => {
+    err['attachLogOnReport'] = true;
     showError(this.mStore.dispatch,
       'An invalid state change was prevented, this was probably caused by a bug', err);
   }
@@ -1064,7 +1078,7 @@ class Application {
             message: 'Your Vortex installation has been corrupted. '
               + 'This could be the result of a virus or manual manipulation. '
               + 'Vortex might still appear to work (partially) but we suggest '
-              + 'you reinstall it.',
+              + 'you reinstall it. For more information please refer to Vortex\'s log files.',
             noLink: true,
             buttons: ['Quit', 'Ignore'],
           })

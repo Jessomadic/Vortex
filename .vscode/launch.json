@@ -1,29 +1,63 @@
 {
-  "version": "0.0.1",
+  "version": "0.2.0",
+  "compounds": [
+    {
+      "name": "Debug Electron",
+      "configurations": [
+        "Debug Main Process",
+        "Debug Renderer Process"
+      ],
+      "presentation": {
+        "hidden": false,
+        "group": "",
+        "order": 1
+      },
+      "stopAll": true,
+    },
+    {
+      "name": "Debug Electron (Staging)",
+      "configurations": [
+        "Debug Main Process (Staging)",
+        "Debug Renderer Process"
+      ],
+      "presentation": {
+        "hidden": false,
+        "group": "",
+        "order": 1
+      },
+      "stopAll": true
+    },
+    {
+      "name": "Debug Electron (Nexus Next)",
+      "configurations": [
+        "Debug Main Process (Nexus Next)",
+        "Debug Renderer Process"
+      ],
+      "presentation": {
+        "hidden": false,
+        "group": "",
+        "order": 1
+      },
+      "stopAll": true
+    }
+  ],
   "configurations": [
     {
-      "name": "Launch",
+      "name": "Debug Main Process",
       "type": "node",
       "request": "launch",
-      "protocol": "inspector",
       "program": "${workspaceFolder}/out/main.js",
-      "stopOnEntry": false,
-      "args": [],
       "cwd": "${workspaceRoot}",
       "runtimeExecutable": "${workspaceRoot}/node_modules/.bin/electron",
       "windows": {
-        "runtimeExecutable": "${workspaceRoot}/node_modules/electron/dist/electron.exe",
+        "runtimeExecutable": "${workspaceRoot}/node_modules/.bin/electron.cmd"
       },
       "runtimeArgs": [
         "."
       ],
       "env": {
         "NODE_ENV": "development",
-        "SIMULATE_FS_ERRORS": "false",
-        "HIGHLIGHT_I18N": "false",
-        "BLUEBIRD_DEBUG": "0",
-        "FORCE_ALLOW_ELEVATED_SYMLINKING": "true",
-        "DEBUG_REACT_RENDERS": "false"
+        "START_DEVTOOLS": "true",
       },
       "envFile": "${workspaceFolder}/.env",
       "console": "integratedTerminal",
@@ -31,47 +65,61 @@
       "outFiles": []
     },
     {
-      "name": "Launch Linux",
+      "name": "Debug Main Process (Staging)",
       "type": "node",
       "request": "launch",
-      "program": "${workspaceRoot}/out/main.js",
-      "stopOnEntry": false,
-      "args": [],
+      "program": "${workspaceFolder}/out/main.js",
       "cwd": "${workspaceRoot}",
-      "preLaunchTask": "prestart",
       "runtimeExecutable": "${workspaceRoot}/node_modules/.bin/electron",
+      "windows": {
+        "runtimeExecutable": "${workspaceRoot}/node_modules/.bin/electron.cmd"
+      },
       "runtimeArgs": [
         "."
       ],
       "env": {
         "NODE_ENV": "development",
-        "BLUEBIRD_DEBUG": "0"
+        "START_DEVTOOLS": "true",
+        "IS_PREVIEW_BUILD": "true"
       },
-      "console": "internalConsole",
+      "envFile": "${workspaceFolder}/.env",
+      "console": "integratedTerminal",
       "sourceMaps": true,
       "outFiles": []
     },
     {
-      "name": "Attach to renderer",
-      "type": "node",
-      "request": "attach",
-      "port": 9222,
-      "sourceMaps": true
-    },
-    {
-      "name": "Debug Unit Tests",
+      "name": "Debug Main Process (Nexus Next)",
       "type": "node",
       "request": "launch",
-      "program": "${workspaceRoot}/node_modules/jest-cli/bin/jest.js",
-      "args": [
-        "--runInBand"
-      ],
+      "program": "${workspaceFolder}/out/main.js",
       "cwd": "${workspaceRoot}",
-      "preLaunchTask": null,
-      "runtimeExecutable": null,
+      "runtimeExecutable": "${workspaceRoot}/node_modules/.bin/electron",
+      "windows": {
+        "runtimeExecutable": "${workspaceRoot}/node_modules/.bin/electron.cmd"
+      },
       "runtimeArgs": [
-        "--nolazy"
+        "."
+      ],
+      "env": {
+        "NODE_ENV": "development",
+        "START_DEVTOOLS": "true",
+      },
+      "envFile": "${workspaceFolder}/.env",
+      "console": "integratedTerminal",
+      "sourceMaps": true,
+      "outFiles": []
+    },
+    {
+      "name": "Debug Renderer Process",
+      "port": 9230,
+      "request": "attach",
+      "type": "chrome",
+      "timeout": 60000,
+      "skipFiles": [
+        "<node_internals>/**",
+        "${workspaceRoot}/node_modules/**",
+        "${workspaceRoot}/dist-electron/**"
       ]
-    }
+    },
   ]
 }

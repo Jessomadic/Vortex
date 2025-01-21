@@ -1,3 +1,4 @@
+/* eslint-disable */
 import { IExtensionApi } from '../../types/IExtensionContext';
 import * as fs from '../../util/fs';
 import getNormalizeFunc, { Normalize } from '../../util/getNormalizeFunc';
@@ -68,13 +69,13 @@ function deployMods(api: IExtensionApi,
         if (progressCB !== undefined) {
           progressCB(renderModName(mod), Math.round((idx * 50) / length));
         }
-        return method.activate(path.join(installationPath, mod.installationPath),
-                               mod.installationPath, subDir(mod), skipFiles)
-          .then(() => {
-            if (mod.fileOverrides !== undefined) {
-              mod.fileOverrides.forEach(file => skipFiles.add(normalize(file)));
-            }
-          });
+        const modPath = path.join(installationPath, mod.installationPath);
+        const overrides = new Set<string>(skipFiles);
+        if (mod.fileOverrides !== undefined) {
+          mod.fileOverrides.map(file => path.relative(destinationPath, file))
+                           .forEach(file => overrides.add(normalize(file)));
+        }
+        return method.activate(modPath, mod.installationPath, subDir(mod), overrides);
       } catch (err) {
         log('error', 'failed to deploy mod', {err: err.message, id: mod.id});
       }

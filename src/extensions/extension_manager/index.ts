@@ -1,3 +1,4 @@
+/* eslint-disable */
 import {IExtensionApi, IExtensionContext} from '../../types/IExtensionContext';
 import { NotificationDismiss } from '../../types/INotification';
 import { IExtensionLoadFailure, IState } from '../../types/IState';
@@ -17,7 +18,8 @@ import { downloadAndInstallExtension, fetchAvailableExtensions, readExtensions }
 import Promise from 'bluebird';
 import * as _ from 'lodash';
 import * as semver from 'semver';
-import { setDialogVisible } from '../../actions';
+import { setDialogVisible, setExtensionEnabled } from '../../actions';
+import { getGame } from '../../util/api';
 
 interface ILocalState {
   reloadNecessary: boolean;
@@ -103,6 +105,7 @@ function checkForUpdates(api: IExtensionApi) {
 
   return Promise.map(updateable, update => downloadAndInstallExtension(api, update.update))
     .then((success: boolean[]) => {
+      api.dismissNotification('extension-updates');
       localState.reloadNecessary = true;
       if (success.find(iter => iter === true)) {
         if (forceRestart) {
@@ -156,6 +159,26 @@ function installDependency(api: IExtensionApi,
                            updateInstalled: (initial: boolean) => Promise<void>): Promise<boolean> {
   const state: IState = api.store.getState();
   const availableExtensions = state.session.extensions.available;
+  const installedExtensions = state.session.extensions.installed;
+
+  if (installedExtensions[depId] !== undefined) {
+    // installed, probably failed to load or disabled
+    if (!state.app.extensions[depId].enabled) {
+      api.store.dispatch(setExtensionEnabled(depId, true));
+      return Promise.resolve(true);
+    } else {
+      api.showErrorNotification(
+        'Failed to install extension',
+        'The extension "{{ name }}" is already installed but failed to load, '
+        + 'please review the load error on the "Extensions" tab.', {
+          message: depId,
+          allowReport: false,
+          replace: { name: depId },
+        });
+
+      return Promise.resolve(false);
+    }
+  }
 
   const ext = availableExtensions.find(iter =>
     (!iter.type && ((iter.name === depId) || (iter.id === depId))));
@@ -164,6 +187,17 @@ function installDependency(api: IExtensionApi,
       .then(success => {
         if (success) {
           updateInstalled(false);
+        } else {
+          api.showErrorNotification(
+            'Failed to install extension',
+            'The extension "{{ name }}" wasn\'t found in the repository. '
+            + 'This might mean that the extension isn\'t available at all or '
+            + 'has been excluded for compatibility reasons. '
+            + 'Please check the installation instructions for this extension.', {
+              message: depId,
+              allowReport: false,
+              replace: { name: depId },
+            });
         }
         return success;
       });
@@ -198,17 +232,7 @@ function checkMissingDependencies(api: IExtensionApi,
             Promise.map(Object.keys(missingDependencies), depId =>
               installDependency(api, depId, updateInstalled)
                 .then(results => {
-                  if (!results) {
-                    api.showErrorNotification('Failed to install extension',
-                      'The extension "{{ name }}" wasn\'t found in the repository. '
-                      + 'This might mean that the extension isn\'t available on Nexus at all or '
-                      + 'has been excluded for compatibility reasons. '
-                      + 'Please check the installation instructions for this extension.', {
-                      message: depId,
-                      allowReport: false,
-                      replace: { name: depId },
-                    });
-                  } else {
+                  if (results) {
                     api.sendNotification({
                       type: 'success',
                       message: 'Missing dependencies were installed - please restart Vortex',
@@ -340,6 +364,53 @@ function init(context: IExtensionContext) {
         });
       });
 
+    context.api.events.on('gamemode-activated', (gameMode: string) => {
+      const state = context.api.getState();
+      const game = getGame(gameMode);
+      const gameExtId = Object.keys(state.session.extensions.installed).find(key =>
+        game.extensionPath === state.session.extensions.installed[key].path);
+      if (!gameExtId || !state.session.extensions.optional[gameExtId]) {
+        return;
+      }
+      const requiredIds = [];
+      for (const ext of state.session.extensions.optional[gameExtId]) {
+        if (!state.session.extensions.installed[ext.id]) {
+          requiredIds.push(ext.id);
+        }
+      }
+
+      if (requiredIds.length > 0) {
+        const t = context.api.translate;
+        context.api.sendNotification({
+          id: `missing-optional-extensions-${gameExtId}`,
+          type: 'warning',
+          message: 'Missing Optional Extension/s',
+          allowSuppress: true,
+          actions: [{
+            title: 'More', action: (dismiss) => {
+              context.api.showDialog('question', 'Missing Optional Extension/s', {
+                bbcode: t('Some optional extensions for "{{game}}" are missing.[br][/br][br][/br]'
+                      + 'Do you want to install them now?', { replace: { game: game.name } }),
+                message: `Missing extensions:\n\n${requiredIds.map(id => `- ${id}\n`).join('')}`,
+              }, [
+                { label: 'Cancel', action: () => dismiss() },
+                { label: 'Install', action: async () => {
+                  dismiss();
+                  for (const id of requiredIds) {
+                    await installDependency(context.api, id, updateExtensions);
+                  }    
+                }}
+              ])
+            }
+          }, {
+            title: 'Install Extension/s', action: async () => {
+              for (const id of requiredIds) {
+                await installDependency(context.api, id, updateExtensions);
+              }
+          }}]
+        });
+      }
+    });
     context.api.onAsync('install-extension-from-download', (archiveId: string) => {
       const state = context.api.getState();
       const modId = state.persistent.downloads.files[archiveId]?.modInfo?.nexus?.ids?.modId;

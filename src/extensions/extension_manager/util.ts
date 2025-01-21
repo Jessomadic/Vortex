@@ -2,6 +2,7 @@ import { IExtensionApi } from '../../types/IExtensionContext';
 import { IDownload, IState } from '../../types/IState';
 import { DataInvalid, ProcessCanceled, ServiceTemporarilyUnavailable, UserCanceled } from '../../util/CustomErrors';
 import * as fs from '../../util/fs';
+import { writeFileAtomic } from '../../util/fsAtomic';
 import getVortexPath from '../../util/getVortexPath';
 import { log } from '../../util/log';
 import { jsonRequest, rawRequest } from '../../util/network';
@@ -41,13 +42,14 @@ function githubRawUrl(repo: string, branch: string, repoPath: string) {
   return `https://raw.githubusercontent.com/${repo}/${branch}/${repoPath}`;
 }
 
-const EXTENSION_FORMAT = '1_8';
-const EXTENSION_FILENAME = `extensions_${EXTENSION_FORMAT}.json`;
-const EXTENSION_URL = githubRawUrl('Nexus-Mods/Vortex', 'announcements', EXTENSION_FILENAME);
+//const EXTENSION_FORMAT = '1_8';
+const EXTENSION_FILENAME = `extensions-manifest.json`;
+const EXTENSION_PATH = 'out/';
+const EXTENSION_URL = githubRawUrl('Nexus-Mods/Vortex-Backend', 'main', EXTENSION_PATH + EXTENSION_FILENAME);
 
 function getAllDirectories(searchPath: string): Promise<string[]> {
   return fs.readdirAsync(searchPath)
-    .filter(fileName => {
+    .filter((fileName: string) => {
       if (path.extname(fileName) === '.installing') {
         // ignore directories during installation
         return Promise.resolve(false);
@@ -65,7 +67,8 @@ function getAllDirectories(searchPath: string): Promise<string[]> {
           // temporary ".installing" directory
           return Promise.resolve(false);
         });
-    });
+    })
+    .catch({ code: 'ENOENT' }, () => []);
 }
 
 function applyExtensionInfo(id: string, bundled: boolean, values: any, fallback: any): IExtension {
@@ -177,11 +180,9 @@ function downloadExtensionList(cachePath: string): Promise<IAvailableExtension[]
       log('debug', 'extension list received');
       return manifest.extensions.filter(ext => ext.name !== undefined);
     })
-    .tap(extensions =>
-      fs.writeFileAsync(cachePath,
-                        JSON.stringify({ extensions }, undefined, 2),
-                        { encoding: 'utf8' }));
-}
+    .tap(extensions => writeFileAtomic(cachePath, JSON.stringify({ extensions }, undefined, 2)))
+    .tapCatch(err => log('error', 'failed to download extension list', err));
+  }
 
 function doFetchAvailableExtensions(forceDownload: boolean)
                                     : Promise<{ time: Date, extensions: IAvailableExtension[] }> {
@@ -244,7 +245,8 @@ export function downloadAndInstallExtension(api: IExtensionApi,
   } else if (truthy(ext.githubRelease)) {
     dlPromise = downloadGithubRelease(api, ext);
   } else {
-    dlPromise = Promise.reject(new ProcessCanceled('Failed to download'));
+    // don't report an error if the extension list contains invalid data
+    return Promise.resolve(false);
   }
 
   const sourceName: string = truthy(ext.modId)

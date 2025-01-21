@@ -1,7 +1,8 @@
+/* eslint-disable */
 import { setDownloadModInfo } from '../../actions';
 import { IExtensionApi, StateChangeCallback } from '../../types/IExtensionContext';
 import { IDownload, IModTable, IState } from '../../types/IState';
-import { ArgumentInvalid, DataInvalid, ProcessCanceled, UserCanceled } from '../../util/CustomErrors';
+import { DataInvalid, ProcessCanceled, UserCanceled } from '../../util/CustomErrors';
 import Debouncer from '../../util/Debouncer';
 import * as fs from '../../util/fs';
 import { log } from '../../util/log';
@@ -15,7 +16,7 @@ import { toPromise, truthy } from '../../util/util';
 import { resolveCategoryName } from '../category_management';
 import { AlreadyDownloaded, DownloadIsHTML } from '../download_management/DownloadManager';
 import { SITE_ID } from '../gamemode_management/constants';
-import {IGameStored} from '../gamemode_management/types/IGameStored';
+import { IGameStoredExt } from '../gamemode_management/types/IGameStored';
 import { setUpdatingMods } from '../mod_management/actions/session';
 import { IModListItem } from '../news_dashlet/types';
 
@@ -25,14 +26,15 @@ import { nexusGameId, toNXMId } from './util/convertGameId';
 import { FULL_COLLECTION_INFO, FULL_REVISION_INFO, CURRENT_REVISION_INFO } from './util/graphQueries';
 import submitFeedback from './util/submitFeedback';
 
-import { NEXUS_BASE_URL, NEXUS_NEXT_URL } from './constants';
+import { NEXUS_BASE_URL, NEXUS_NEXT_URL, USERINFO_ENDPOINT } from './constants';
 import { checkModVersionsImpl, endorseDirectImpl, endorseThing, ensureLoggedIn, processErrorMessage,
-         resolveGraphError, startDownload, updateKey, updateToken } from './util';
+         resolveGraphError, startDownload, transformUserInfoFromApi, updateKey, updateToken } from './util';
 
-import Nexus, { EndorsedStatus, ICollection, ICollectionManifest,
+import Nexus, { EndorsedStatus, HTTPError, ICollection, ICollectionManifest,
                 IDownloadURL, IFeedbackResponse,
                 IFileInfo,
-                IIssue, IModInfo, IRating, IRevision, NexusError,
+                IIssue, IModInfo, IRating, IRevision, IUserInfo, NexusError,
+                ProtocolError,
                 RateLimitError, TimeoutError } from '@nexusmods/nexus-api';
 import Promise from 'bluebird';
 import * as path from 'path';
@@ -95,7 +97,7 @@ export function onChangeDownloads(api: IExtensionApi, nexus: Nexus) {
 
   return (oldValue: IModTable, newValue: IModTable) =>
       updateDebouncer.schedule(undefined, newValue);
-}
+} 
 
 /**
  * callback for when mods are changed
@@ -222,7 +224,7 @@ function getFileId(download: IDownload): number {
 }
 
 function downloadFile(api: IExtensionApi, nexus: Nexus,
-                      game: IGameStored, modId: number, fileId: number,
+                      game: IGameStoredExt, modId: number, fileId: number,
                       fileName?: string,
                       allowInstall?: boolean): Promise<string> {
     const state: IState = api.getState();
@@ -268,8 +270,11 @@ export function onModUpdate(api: IExtensionApi, nexus: Nexus) {
   return (gameId: string, modId: number, fileId: number, source: string) => {
     let game = gameId === SITE_ID ? null : gameById(api.store.getState(), gameId);
 
-    if (game === undefined) {
+    if (!game) {
       log('warn', 'mod update requested for unknown game id', gameId);
+
+      // Attempt to get the current game from the state as a fallback - it's perfectly possible
+      //  for the passed gameId to be a compatibleDownload entry for the currently managed game.
       game = currentGame(api.getState());
     }
 
@@ -278,7 +283,16 @@ export function onModUpdate(api: IExtensionApi, nexus: Nexus) {
       return;
     }
 
-    downloadFile(api, nexus, game, modId, fileId, undefined, false)
+    const downloadGameId = truthy(game)
+        ? (game.id !== gameId)
+          ? gameId // download id is different from the game extension's id - this is a compatibleDownload entry.
+          : game.id
+        : gameId; // Game is not present in the state. Concurrency issue? lets just assign it to gameId.
+    const downloadFunc = () => truthy(game)
+      ? downloadFile(api, nexus, { ...game, downloadGameId }, modId, fileId, undefined, false)
+      : Promise.reject(new ProcessCanceled('Game not found')); // Can't download an update for a game extension that doesn't exist
+
+    downloadFunc()
       .catch(AlreadyDownloaded, err => {
         const state = api.getState();
         const downloads = state.persistent.downloads.files;
@@ -304,7 +318,7 @@ export function onModUpdate(api: IExtensionApi, nexus: Nexus) {
         api.showErrorNotification('Invalid URL', url, { allowReport: false });
       })
       .catch(ProcessCanceled, () => {
-        const url = [NEXUS_BASE_URL, nexusGameId(game), 'mods', modId].join('/');
+        const url = [NEXUS_BASE_URL, nexusGameId(game, gameId), 'mods', modId].join('/');
         const params = `?tab=files&file_id=${fileId}&nmm=1`;
         return opn(url + params)
           .catch(() => undefined);
@@ -357,8 +371,10 @@ export function onGetMyCollections(api: IExtensionApi, nexus: Nexus)
       CURRENT_REVISION_INFO, nexusGameId(game), count, offset))
       .then(res => (res ?? []).map(coll => coll.currentRevision))
       .catch(err => {
-        if (err.code !== 'UNAUTHORIZED') {
-          api.showErrorNotification('Failed to get list of collections', err);
+        if (!['NOT_FOUND', 'UNAUTHORIZED'].includes(err.code)) {
+          api.showErrorNotification('Failed to get list of collections', err, {
+            allowReport: !['MODEL_NOT_FOUND'].includes(err.code)
+          });
         }
         return Promise.resolve([]);
       });
@@ -464,6 +480,10 @@ function reportRateError(api: IExtensionApi, err: Error, revisionId: number) {
       message,
       displayMS: calcDuration(message.length),
     });
+  } else if (err['code'] === 'NOT_FOUND') {
+    api.showErrorNotification('Collection not found, it might have been removed.', err, {
+      allowReport: false,
+    });
   } else if ((['ENOENT', 'ECONNRESET', 'ECONNABORTED', 'ESOCKETTIMEDOUT'].includes(err['code']))
       || (err instanceof ProcessCanceled)) {
     api.showErrorNotification('Rating collection failed, please try again later', err, {
@@ -531,11 +551,12 @@ export function onDownloadUpdate(api: IExtensionApi,
       return Promise.resolve(undefined);
     }
 
-    const game = (gameId === SITE_ID)
-      ? null
-      : gameById(api.store.getState(), gameId);
-
-    if (game === undefined) {
+    const state = api.getState();
+    const game = (gameId === SITE_ID) ? null : gameById(state, gameId);
+    const activeGame = currentGame(state);
+    const compatibleDownloads = activeGame?.details?.compatibleDownloads || [];
+    const hasCompatibleDownloadId = compatibleDownloads.includes(gameId);
+    if (game === undefined && !hasCompatibleDownloadId) {
       api.sendNotification({
         type: 'error',
         title: 'Invalid game id',
@@ -721,6 +742,36 @@ export function onGetLatestMods(api: IExtensionApi, nexus: Nexus) {
   };
 }
 
+
+export function onRefreshUserInfo(nexus: Nexus, api: IExtensionApi) {
+  return (): Promise<void> => {
+
+    // only called from the global menu item 
+
+    //const token = getOAuthTokenFromState(api);
+    
+    log('info', 'onRefreshUserInfo() started');
+
+    // we have an oauth token in state
+    //if(token !== undefined) {      
+      // get userinfo from api
+      return Promise.resolve(nexus.getUserInfo())
+      .then(apiUserInfo => {        
+        api.store.dispatch(setUserInfo(transformUserInfoFromApi(apiUserInfo)));
+        log('info', 'onRefreshUserInfo() nexus.getUserInfo response', apiUserInfo);
+      })
+      .catch((err) => {
+        log('error', `onRefreshUserInfo() nexus.getUserInfo response ${err.message}`, err);
+        showError(api.store.dispatch, 'An error occurred refreshing user info', err, {
+          allowReport: false,
+        });
+      });  
+    //} else {
+    //  log('warn', 'onRefreshUserInfo() no oauth token');
+    //}
+  };
+}
+
 export function onGetTrendingMods(api: IExtensionApi, nexus: Nexus) {
   return (gameId: string): Promise<{ id: string, encoding: string, mods: IModListItem[] }> => {
     const state = api.getState();
@@ -745,9 +796,14 @@ export function onAPIKeyChanged(api: IExtensionApi, nexus: Nexus): StateChangeCa
   };
 }
 
+// fired when state variable changes 'confidential.account.nexus.OAuthCredentials'
 export function onOAuthTokenChanged(api: IExtensionApi, nexus: Nexus): StateChangeCallback {
   return (oldValue: ITokenReply, newValue: ITokenReply) => {
+    log('info', 'onOAuthTokenChanged event handler.')
+
+    // remove user info
     api.store.dispatch(setUserInfo(undefined));
+    
     if (newValue !== undefined) {
       updateToken(api, nexus, newValue);
     }

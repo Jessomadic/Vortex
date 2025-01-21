@@ -1,7 +1,8 @@
+/* eslint-disable */
 import { setNextProfile } from '../../actions';
 import { addNotification, showDialog } from '../../actions/notifications';
 import { IDiscoveredTool } from '../../types/IDiscoveredTool';
-import { ThunkStore } from '../../types/IExtensionContext';
+import { IExtensionApi, ThunkStore } from '../../types/IExtensionContext';
 import { IGame } from '../../types/IGame';
 import { GameEntryNotFound, IGameStore } from '../../types/IGameStore';
 import { IState } from '../../types/IState';
@@ -55,6 +56,7 @@ export interface IGameStub {
  * @class GameModeManager
  */
 class GameModeManager {
+  private mApi: IExtensionApi;
   private mStore: ThunkStore<IState>;
   private mKnownGames: IGame[];
   private mGameStubs: IGameStub[];
@@ -62,10 +64,12 @@ class GameModeManager {
   private mActiveSearch: Promise<void>;
   private mOnGameModeActivated: (mode: string) => void;
 
-  constructor(extensionGames: IGame[],
+  constructor(api: IExtensionApi,
+              extensionGames: IGame[],
               gameStubs: IGameStub[],
               gameStoreExtensions: IGameStore[],
               onGameModeActivated: (mode: string) => void) {
+    this.mApi = api;
     this.mStore = null;
     this.mKnownGames = extensionGames;
     this.mGameStubs = gameStubs;
@@ -88,7 +92,9 @@ class GameModeManager {
   public attachToStore(store: Redux.Store<IState>) {
     this.mStore = store;
 
-    const gamesStored: IGameStored[] = this.mKnownGames.map(this.storeGame);
+    const gamesStored: IGameStored[] = this.mKnownGames
+      .map(this.storeGame)
+      .filter(this.isValidGame);
     store.dispatch(setKnownGames(gamesStored));
     // we used to activate the game mode right here but there is another
     // call to do this in the "once" CB of gamemode_management so it's
@@ -176,7 +182,15 @@ class GameModeManager {
 
     log('debug', 'setup game mode', gameMode);
     if (gameDiscovery?.path === undefined) {
-      return Promise.reject(new Error('game not discovered'));
+      // if the user starts Vortex with --game xyz and that game was previously detected
+      // but has been uninstalled since then, Vortex initiates the profile/game switch
+      // assuming it knows where the game is. By the time we get here, discovery may
+      // have completed and reset the game discovery.
+      // It would be nicer if all game switching could be deferred until after discovery
+      // has run but that would be a major change that would require a proper round of
+      // testing which is not going to happen now so we have to accept this as a valid
+      // situation.
+      return Promise.reject(new ProcessCanceled('game not discovered'));
     } else if (game?.setup === undefined) {
       return game.getInstalledVersion(gameDiscovery)
         .then(() => Promise.resolve());
@@ -366,7 +380,13 @@ class GameModeManager {
   }
 
   private reloadStoreGames() {
-    return GameStoreHelper.reloadGames();
+    return GameStoreHelper.reloadGames(this.mApi);
+  }
+
+  private isValidGame(game: IGameStored): boolean {
+    return (game.executable !== undefined)
+        && (game.requiredFiles !== undefined)
+        && (game.name !== undefined);
   }
 
   private storeGame = (game: IGame): IGameStored => {

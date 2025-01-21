@@ -23,6 +23,7 @@
   flex-direction: row;
   align-items: flex-start;
   position: relative;
+  border-radius: 4px;
 
   .notification-progress {
     position: absolute;
@@ -57,10 +58,10 @@
     white-space: nowrap;
     z-index: 1;
     button {
-      padding: 0px 2px;
+      padding: 0px 4px;
       margin: 0px 2px;
       background-color: $white;
-      color: $brand-primary;
+      color: $black;
       border: $border-width solid $white;
     }
 
@@ -103,6 +104,9 @@
     max-height: 40vh;
     padding: calc(#{$half-gutter} * 0.5);
     overflow: auto;
+    display: flex;
+    flex-direction: column;
+    gap: 4px;
   }
 }
 

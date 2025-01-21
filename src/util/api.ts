@@ -12,6 +12,7 @@ import { resolveCategoryName,
 import { readExtensibleDir } from '../extensions/extension_manager/util';
 import { getGame, getGames } from '../extensions/gamemode_management/util/getGame';
 import { getModType } from '../extensions/gamemode_management/util/modTypeExtensions';
+import getDriveList from '../extensions/gamemode_management/util/getDriveList';
 import deriveModInstallName from '../extensions/mod_management/modIdManager';
 import { getManifest } from '../extensions/mod_management/util/activationStore';
 import { findDownloadByRef, findModByRef, lookupFromDownload } from '../extensions/mod_management/util/dependencies';
@@ -22,7 +23,7 @@ import { makeModReference } from '../extensions/mod_management/util/modReference
 import { getModSource, getModSources } from '../extensions/mod_management/util/modSource';
 import { removeMods } from '../extensions/mod_management/util/removeMods';
 import sortMods, { CycleError } from '../extensions/mod_management/util/sort';
-import testModReference from '../extensions/mod_management/util/testModReference';
+import testModReference, { coerceToSemver } from '../extensions/mod_management/util/testModReference';
 import { convertGameIdReverse, nexusGameId } from '../extensions/nexus_integration/util/convertGameId';
 import GameStoreHelper from '../util/GameStoreHelper';
 import { getApplication } from './application';
@@ -60,7 +61,8 @@ import { batchDispatch, bytesToString, deBOM, delay, isChildPath, isFilenameVali
          makeQueue, makeUnique, makeUniqueByKey, nexusModsURL, objDiff, pad, sanitizeCSSId,
          sanitizeFilename, semverCoerce, setdefault, toBlue, toPromise, unique,
          makeOverlayableDictionary } from './util';
-import { Campaign, Section, Overlayable } from './util';
+import { Campaign, Section, Source, Overlayable } from './util';
+import deepMerge from './deepMerge';
 import walk from './walk';
 
 import SevenZip = require('node-7z');
@@ -87,6 +89,7 @@ export {
   DataInvalid,
   Debouncer,
   deBOM,
+  deepMerge,
   delay,
   deriveModInstallName as deriveInstallName,
   epicGamesLauncher,
@@ -101,6 +104,7 @@ export {
   getApplication,
   getCurrentActivator,
   getCurrentLanguage,
+  getDriveList,
   getGame,
   getGames,
   getManifest,
@@ -121,6 +125,7 @@ export {
   local,
   lookupFromDownload,
   makeModReference,
+  coerceToSemver,
   makeNormalizingDict,
   makeOverlayableDictionary,
   makeQueue,
@@ -158,6 +163,7 @@ export {
   SetupError,
   SevenZip,
   sortMods,
+  Source,
   StarterInfo,
   steam,
   ISteamEntry,

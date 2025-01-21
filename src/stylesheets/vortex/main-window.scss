@@ -42,6 +42,65 @@
   &.toolbar-app-region .main-toolbar-right {
     margin-bottom: 8px;
   }
+
+  .application-icons-group {
+    display: flex;
+    justify-content: flex-end;
+    align-items: center;
+  }
+
+  .toolbar-version {
+    display: flex;
+    justify-content: flex-end;
+    gap: 8px;
+    margin-right: 124px;
+    position: fixed;
+    right: 10px;
+    top: 10px;
+    //height: 30px;
+
+    .toolbar-version-dev {
+      background-color: $white;
+      color: $black;
+    }
+
+    .toolbar-version-staging {
+      background-color: #f97316;
+      color: $black;
+    }
+
+    .toolbar-version-stable {
+      background-color: transparent;
+      color: $gray;
+    }
+    
+    .toolbar-version-beta {
+      background-color: $brand-info;
+      color: $white;
+    }
+
+    .toolbar-version-alpha {
+      background-color: $brand-danger;
+      color: $white;
+    }
+
+    .toolbar-version-container {
+      border-radius: 24px;
+      border: none;
+      padding: 4px 10px;
+      font-weight: 800;
+      display: flex;
+      align-items: center;
+      gap: 4px;
+      text-transform: uppercase;
+      font-family: $font-family-base;
+      font-size: 0.8em;
+
+      .toolbar-version-text {
+        margin: 1px 0 0 0;
+      }
+    }
+  }
 }
 
 // when the window titlebar is disabled, make the main toolbar region
@@ -90,7 +149,7 @@
 
 .application-icons,
 .global-icons {
-  margin-left: $half-gutter;
+  //margin-left: $half-gutter;
   margin-top: auto;
   margin-bottom: auto;
 }
@@ -118,9 +177,17 @@
 
   .main-nav-group-title {
     font-size: $font-size-small;
-    margin-left: 10px;
-    margin-top: 8px;
+    margin: 8px 0 0 8px;
+    font-family: $headings-font-family;
+    text-transform: uppercase;
+    font-weight: 600;
+    color: $gray-dark;
     // text-transform: uppercase;
+    overflow-x: hidden;
+    white-space: nowrap;
+    display: inline-block;
+    text-overflow: ellipsis;
+    width: calc(90%);
   }
 
   .menu-label {
@@ -128,12 +195,13 @@
     vertical-align: middle;
     font-size: $font-size-h6;
     margin-left: 10px;
+    margin-right: 10px;
     // text-transform: uppercase;
   }
 
   &.sidebar-expanded {
     #main-nav-container {
-      max-width: 500px;
+      max-width: 200px;
     }
 
     .menu-label {
@@ -181,7 +249,8 @@
 
 // main window area
 #main-window-pane {
-  background: url('assets/images/bg.png');
+  //background: url('assets/images/bg.png');
+  background-color: $brand-bg;
   background-size: cover;
   color: $text-color;
 
@@ -314,6 +383,7 @@
   height: 100%;
   display: inline-flex;
   align-items: center;
+  gap: 8px;
 
   .logout-button {
     text-align: right;
@@ -325,6 +395,39 @@
   .icon-disconnected {
     width: 24px;
     height: 24px;
+  }
+
+  .membership-status {
+
+    width: fit-content;
+    margin-right: 8px; 
+
+    border-radius: 24px;
+    border: none;
+    padding: 4px 10px;
+    font-weight: 800;
+    display: flex;
+    align-items: center;
+    gap: 4px;
+    text-transform: uppercase;
+    font-family: $font-family-base;
+    font-size: 0.8em;
+    background-color: white;
+    color: black;
+
+    .membership-status-text {
+      margin: 2px 0 0 0;
+    }    
+
+    &.premium {
+      background-color: $brand-primary;
+      color: black;
+    }
+
+    &.supporter {
+      background-color: black;
+      color: white;    
+    }
   }
 }
 

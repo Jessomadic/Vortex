@@ -9,9 +9,9 @@ import opn from '../../../util/opn';
 import { truthy } from '../../../util/util';
 
 import { clearOAuthCredentials, setUserAPIKey } from '../actions/account';
-import { IValidateKeyData } from '../types/IValidateKeyData';
+import { IValidateKeyData, IValidateKeyDataV2 } from '../types/IValidateKeyData';
 
-import { FALLBACK_AVATAR, NEXUS_BASE_URL } from '../constants';
+import { FALLBACK_AVATAR, NEXUS_BASE_URL, OAUTH_URL } from '../constants';
 
 import NexusT from '@nexusmods/nexus-api';
 import * as path from 'path';
@@ -22,13 +22,18 @@ import { ThunkDispatch } from 'redux-thunk';
 import { pathToFileURL } from 'url';
 import { isLoggedIn } from '../selectors';
 
+import { setOauthPending } from '../actions/session';
+import { showError } from '../../../util/message';
+
 export interface IBaseProps extends WithTranslation {
   nexus: NexusT;
 }
 
+
+
 interface IConnectedProps {
   isLoggedIn: boolean;
-  userInfo: IValidateKeyData;
+  userInfo: IValidateKeyDataV2;
   networkConnected: boolean;
 }
 
@@ -36,6 +41,7 @@ interface IActionProps {
   onSetAPIKey: (APIKey: string) => void;
   onClearOAuthCredentials: () => void;
   onShowDialog: () => void;
+  onShowError: (title: string, err: Error) => void;
 }
 
 type IProps = IBaseProps & IConnectedProps & IActionProps;
@@ -54,6 +60,7 @@ class LoginIcon extends ComponentEx<IProps, {}> {
     }
     return (
       <span id='login-control'>
+        {this.renderMembershipStatus()}
         {this.renderLoginName()}
         {this.renderAvatar()}
       </span >
@@ -66,7 +73,38 @@ class LoginIcon extends ComponentEx<IProps, {}> {
     onClearOAuthCredentials();
   }
 
-  private renderLoginName() {
+  private getMembershipText(userInfo: IValidateKeyDataV2):string {
+
+    if(userInfo?.isPremium === true) {
+      return '★ Premium';
+    }
+    else if(userInfo?.isSupporter === true && userInfo?.isPremium === false) {
+      return 'Supporter';
+    }
+    else if(userInfo?.isLifetime === true) {
+      return 'Premium';
+    }
+    return 'Free';
+  }
+
+  private renderMembershipStatus = () => {
+    const { t, userInfo } = this.props;
+
+    const membership = this.getMembershipText(userInfo);
+    const classes = `membership-status ${membership.toLocaleLowerCase()}`
+
+    if (this.isLoggedIn()) {
+      return (
+        <div id='membership-status' className={classes}>
+          <div className='membership-status-text'>{membership}</div>
+        </div>
+      );
+    } else {
+      return null;
+    }
+  }
+
+  private renderLoginName = () => {
     const { t, userInfo } = this.props;
 
     if (this.isLoggedIn()) {
@@ -85,7 +123,7 @@ class LoginIcon extends ComponentEx<IProps, {}> {
     }
   }
 
-  private renderAvatar() {
+  private renderAvatar = () => {
     const { t, userInfo } = this.props;
 
     const loggedIn = this.isLoggedIn();
@@ -117,18 +155,30 @@ class LoginIcon extends ComponentEx<IProps, {}> {
     );
   }
 
-  private showLoginLayer = () => {
+  private showLoginLayer = async () => {
     const { userInfo } = this.props;
+    
     if (!this.isLoggedIn()) {
       this.context.api.events.emit('analytics-track-click-event', 'Profile', 'Site profile');
       this.setDialogVisible(true);
+      this.launchNexusOauth();
     } else {
       opn(`${NEXUS_BASE_URL}/users/${userInfo.userId}`).catch(err => undefined);
     }
   }
 
-  private isLoggedIn() {
+  private launchNexusOauth = () => {
+    this.context.api.events.emit('request-nexus-login', (err: Error) => { 
+      if (err !== null) {
+        this.props.onShowError('Login Failed', err);
+        this.hideLoginLayer();
+      }
+    });
+  }
+
+  private isLoggedIn = () => {
     const { isLoggedIn, userInfo } = this.props;
+    //return isLoggedIn;
     return isLoggedIn && (userInfo !== undefined) && (userInfo !== null);
   }
 
@@ -136,7 +186,7 @@ class LoginIcon extends ComponentEx<IProps, {}> {
     this.setDialogVisible(false);
   }
 
-  private setDialogVisible(visible: boolean): void {
+  private setDialogVisible = (visible: boolean): void => {
     this.props.onShowDialog();
   }
 }
@@ -154,6 +204,8 @@ function mapDispatchToProps(dispatch: ThunkDispatch<any, null, Redux.Action>): I
     onSetAPIKey: (APIKey: string) => dispatch(setUserAPIKey(APIKey)),
     onClearOAuthCredentials: () => dispatch(clearOAuthCredentials(null)),
     onShowDialog: () => dispatch(setDialogVisible('login-dialog')),
+    onShowError: (title: string, err: Error) =>
+      showError(dispatch, title, err, { allowReport: false }),
   };
 }
 

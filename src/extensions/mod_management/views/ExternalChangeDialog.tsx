@@ -232,13 +232,14 @@ class ExternalChangeDialog extends ComponentEx<IProps, IComponentState> {
       <div style={{ flex: '1 1 0', display: 'flex', flexDirection: 'column' }}>
         {text}
         <p>{actions.map(action => (
+          <>
           <a
             key={action.key}
             onClick={this.setAll[type]}
             href={'#' + action.key}
-            style={{ marginRight: 10 }}
           >{t(action.allText)}
-          </a>
+          </a><span className='link-action-seperator'>&nbsp; | &nbsp;</span>
+          </>
         ))
         }</p>
         <div style={{ overflowY: 'auto', flex: '1 1 0' }}>
@@ -436,11 +437,14 @@ class ExternalChangeDialog extends ComponentEx<IProps, IComponentState> {
               actions: false,
               choices: () => possibleActions[type],
               onChangeValue: (file: IFileEntry, value: any) => {
+                const typeActions = possibleActions[type];
+                const idx = typeActions.findIndex(act => act.key === file.action);
+                if (idx < 0) {
+                  return;
+                }
                 if (value === undefined) {
-                  const typeActions = possibleActions[type];
-                  const idx = typeActions.findIndex(act => act.key === file.action);
                   this.props.onChangeAction([file.filePath],
-                                typeActions[(idx + 1) % typeActions.length].key as FileAction);
+                    typeActions[(idx + 1) % typeActions.length].key as FileAction);
                 } else {
                   this.props.onChangeAction([file.filePath], value);
                 }

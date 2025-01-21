@@ -48,6 +48,13 @@ describe('objDiff', () => {
       '+chng': 42,
     });
   });
+  it('doesn\'t fail if object has overloaded hasOwnProperty', () => {
+    let res = util.objDiff({ hasOwnProperty: 1, foo: 42 }, { hasOwnProperty: 2, foo: 42 });
+    expect(res).toEqual({
+      '-hasOwnProperty': 1,
+      '+hasOwnProperty': 2,
+    })
+  });
 });
 
 describe('isFilenameValid', () => {
@@ -181,13 +188,13 @@ describe('nexusModsURL', () => {
   });
   it('supports tracking campaigns', () => {
     expect(util.nexusModsURL(['foo', 'bar'], { campaign: util.Campaign.ViewCollection }))
-      .toBe('https://www.nexusmods.com/foo/bar?pk_campaign=ViewCollection&pk_source=vortex');
+      .toBe('https://www.nexusmods.com/foo/bar?utm_medium=vortex&utm_source=vortex&utm_campaign=view_collection');
   });
   it('supports additional parameters', () => {
     expect(util.nexusModsURL(['foo', 'bar'], {
       campaign: util.Campaign.ViewCollection,
       parameters: ['foo=bar'],
     }))
-      .toBe('https://www.nexusmods.com/foo/bar?foo=bar&pk_campaign=ViewCollection&pk_source=vortex');
+      .toBe('https://www.nexusmods.com/foo/bar?foo=bar&utm_medium=vortex&utm_source=vortex&utm_campaign=view_collection');
   });
 });

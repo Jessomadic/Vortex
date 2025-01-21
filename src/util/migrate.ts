@@ -2,7 +2,7 @@ import getDownloadPath from '../extensions/download_management/util/getDownloadP
 import resolvePath, { pathDefaults } from '../extensions/mod_management/util/resolvePath';
 import { IState } from '../types/IState';
 
-import { completeMigration, setDownloadPath, setInstallPath } from '../actions';
+import { clearOAuthCredentials, completeMigration, setForcedLogout, setDownloadPath, setInstallPath, setUserAPIKey, setUserInfo } from '../actions';
 import * as fs from '../util/fs';
 import makeCI from '../util/makeCaseInsensitive';
 
@@ -10,11 +10,12 @@ import { UserCanceled } from './CustomErrors';
 import { log } from './log';
 
 import Promise from 'bluebird';
-import { BrowserWindow, dialog } from 'electron';
+import { BrowserWindow, MessageBoxOptions, dialog } from 'electron';
 import * as path from 'path';
 import * as Redux from 'redux';
 import * as semver from 'semver';
 import format from 'string-template';
+import { reinterpretUntilZeros } from 'ref';
 
 interface IMigration {
   id: string;
@@ -78,13 +79,44 @@ function transferPath(from: string, to: string): Promise<void> {
 function dialogProm(window: BrowserWindow, type: string, title: string,
                     message: string, options: string[]): Promise<string> {
   return Promise.resolve(dialog.showMessageBox(window, {
-      type,
+      type: type as ('none' | 'info' | 'error' | 'question' | 'warning'),
       buttons: options,
       title,
       message,
       noLink: true,
     })).then(result => options[result.response]);
 }
+
+function forceLogoutForOauth_1_9(window: BrowserWindow, store: Redux.Store<IState>): Promise<void> {
+  const state = store.getState();
+
+  const apiKey = state.confidential.account?.['nexus']?.['APIKey'];
+  const oauthCred = state.confidential.account?.['nexus']?.['OAuthCredentials'];
+
+  const loggedIn = (apiKey !== undefined) || (oauthCred !== undefined);
+
+  log('info', 'forceLogoutForOauth_1_9() migration function for pre-oauth (1.9) versions', { 
+    apiKey: apiKey, 
+    oauthCred: oauthCred, 
+    loggedIn: loggedIn});  
+
+  // we only care about forcing re-authing if they are logged in already
+  if(!loggedIn) {
+    log('warn', 'forceLogoutForOauth_1_9() not logged in so skipping migration');
+    return;    
+  }
+
+  // this is going to force a logout and set the ForceLogout flag in the state so that the nexus_integration extension can pick up the change
+  store.dispatch(setUserAPIKey(undefined));
+  store.dispatch(clearOAuthCredentials(null)) 
+  store.dispatch(setUserInfo(undefined));
+  store.dispatch(setForcedLogout(true));
+
+  log('info', 'forceLogoutForOauth_1_9() should be logged out');
+
+  return;
+}
+
 
 function moveDownloads_0_16(window: BrowserWindow, store: Redux.Store<IState>): Promise<void> {
   const state = store.getState();
@@ -144,6 +176,14 @@ const migrations: IMigration[] = [
     doQuery: false,
     description: 'install path is now in a different spot of the store',
     apply: updateInstallPath_0_16,
+  },
+  {
+    id: 'forceLogoutForOauth_1_9',
+    minVersion: '1.9.0',
+    maySkip: false,
+    doQuery: false,
+    description: 'forcing logout for anything pre-oauth, and deprecating apikey logins',
+    apply: forceLogoutForOauth_1_9,
   },
 ];
 

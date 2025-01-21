@@ -1,7 +1,9 @@
-import { log } from '../../../util/log';
+/* eslint-disable */
 import { truthy } from '../../../util/util';
 
-import { IMod, IModReference } from '../types/IMod';
+import { log } from '../../../util/log';
+
+import { IMod, IModReference, IFileListItem } from '../types/IMod';
 
 import * as _ from 'lodash';
 import minimatch from 'minimatch';
@@ -23,6 +25,9 @@ export interface IModLookupInfo {
   modId?: string;
   source?: string;
   referenceTag?: string;
+  installerChoices?: any;
+  patches?: any;
+  fileList?: IFileListItem[];
 }
 
 // test if the reference is by id only, meaning it is only useful in the current setup
@@ -54,10 +59,44 @@ const fuzzyVersionCache: { [input: string]: boolean } = {};
 
 const coerceableRE = /^v?[0-9.]+$/;
 
-function safeCoerce(input: string): string {
+export function safeCoerce(input: string): string {
   return coerceableRE.test(input)
-    ? semver.coerce(input)?.raw ?? input
+    ? coerceToSemver(input) ?? input
     : input;
+}
+
+export function coerceToSemver(version: string): string {
+  version = version?.trim?.();
+  if (!version) {
+    return undefined;
+  }
+  const match = version.match(/^(\d+)\.(\d+)\.(\d+)(.*)$/);
+  if (match) {
+    const major = match[1];
+    const minor = match[2];
+    const patch = match[3];
+    let preRelease = match[4].trim();
+
+    // If there's something after the first three segments, treat it as pre-release
+    if (preRelease) {
+      // Remove leading punctuation from the pre-release part
+      preRelease = preRelease.replace(/^[\.\-\+]/, '');
+      return `${major}.${minor}.${patch}-${preRelease}`;
+    } else {
+      return `${major}.${minor}.${patch}`;
+    }
+  } else {
+    if (coerceableRE.test(version)) {
+      // Remove leading 0's from the version segments as that's
+      //  an illegal semantic versioning format/pattern
+      const sanitizedVersion = version.replace(/\b0+(\d)/g, '$1');
+      const coerced = semver.coerce(sanitizedVersion);
+      if (coerced) {
+        return coerced.version
+      }
+      return version;
+    }
+  }
 }
 
 export function isFuzzyVersion(input: string) {
@@ -123,6 +162,23 @@ function testRef(mod: IModLookupInfo, modId: string, ref: IModReference,
     return false;
   }
 
+  // Right installer choices?
+  if ((ref.installerChoices !== undefined && Object.keys(ref.installerChoices).length > 0) && (!_.isEqualWith(mod.installerChoices, ref.installerChoices))) {
+    return false;
+  }
+
+  // Right hashes?
+  if ((ref.fileList !== undefined && ref.fileList.length > 0) && (!_.isEqual(ref.fileList, mod.fileList))) {
+    return false;
+  }
+
+  // Right patches?
+  if ((ref.patches !== undefined && Object.keys(ref.patches).length > 0 && ref.tag !== undefined) && ((!_.isEqual(mod.patches, ref.patches)))) {
+    if (mod?.patches !== undefined && mod.referenceTag !== ref.tag) {
+      return false;
+    }
+  }
+
   if (ref.tag !== undefined) {
     if (mod.referenceTag === ref.tag) {
       return true;
@@ -159,10 +215,10 @@ function testRef(mod: IModLookupInfo, modId: string, ref: IModReference,
   if (ref.logicalFileName !== undefined) {
     if (mod.additionalLogicalFileNames !== undefined) {
       if (!mod.additionalLogicalFileNames.includes(ref.logicalFileName)
-          && (ref.logicalFileName !== mod.logicalFileName)) {
+          && (![mod.logicalFileName, mod.customFileName].includes(ref.logicalFileName) && ref.fileExpression === undefined)) {
         return false;
       }
-    } else if (ref.logicalFileName !== mod.logicalFileName) {
+    } else if (![mod.logicalFileName, mod.customFileName].includes(ref.logicalFileName) && ref.fileExpression === undefined) {
       return false;
     }
   }
@@ -189,11 +245,11 @@ function testRef(mod: IModLookupInfo, modId: string, ref: IModReference,
       && truthy(mod.version)) {
     const versionMatch = ref.versionMatch.split('+')[0];
     const doesMatch = (mod.version === ref.versionMatch)
-                    || (mod.version === safeCoerce(versionMatch));
+                    || (safeCoerce(mod.version) === safeCoerce(versionMatch)) || ref.fileMD5 === mod.fileMD5;
     if (!doesMatch) {
-      const versionCoerced = semver.coerce(mod.version);
+      const versionCoerced = safeCoerce(mod.version);
       if (semver.valid(versionCoerced)) {
-        if (!semver.satisfies(versionCoerced, versionMatch, true)) {
+        if (!semver.satisfies(versionCoerced, versionMatch, { loose: true, includePrerelease: true })) {
           return false;
         } // the version is a valid semantic version and does match
       } else {

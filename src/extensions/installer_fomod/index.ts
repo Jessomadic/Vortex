@@ -107,7 +107,8 @@ function transformError(err: any): Error {
                                   + 'archive is damaged, extraction failed or the directory '
                                   + 'was externally modified between extraction and now. '
                                   + `"${err.Message}"`);
-  } else if (err.name === 'System.IO.FileLoadException') {
+  } else if ((err.name === 'System.IO.FileLoadException')
+             || (err.message ?? '').includes('FileLoadException: Could not load file or assembly')) {
     if (err?.FileName) {
       if (err.FileName.indexOf('node_modules\\fomod-installer') !== -1) {
         const fileName = err.FileName.replace(/^file:\/*/, '');
@@ -117,17 +118,17 @@ function transformError(err: any): Error {
           + 'Please install Vortex or unblock all .dll and .exe files manually.');
       }
     } else {
-      result = new SetupError('Windows prevented Vortex from loading the files necessary '
-        + 'to complete installation operations. '
-        + 'This is usually caused if you don\'t install Vortex but only extracted it because '
-        + 'Windows will then block all executable files. '
+      result = new SetupError('Windows prevented Vortex from loading files necessary '
+        + 'to complete the installation. '
+        + 'This is often caused if you extracted Vortex manually instead of running the installer or '
+        + 'because your windows setup or third party software modified access permissions for these files. '
         + 'Please install Vortex or unblock all .dll and .exe files manually.');
     }
   } else if (err.name === 'System.IO.PathTooLongException') {
     result = new SetupError('The installer tried to access a file with a path longer than 260 '
                         + 'characters. This usually means that your mod staging path is too long.');
   } else if ((err.name === 'System.IO.IOException')
-             && (err.stack.indexOf('System.IO.Path.InternalGetTempFileName'))) {
+             && (err.stack.includes('System.IO.Path.InternalGetTempFileName'))) {
     const tempDir = getVortexPath('temp');
     result = new SetupError(`Your temp directory "${tempDir}" contains too many files. `
                           + 'You need to clean up that directory. Files in that directory '
@@ -212,11 +213,10 @@ function processAttributes(input: any, modPath: string): Bluebird<any> {
       const xmlDoc = parser.parseFromString(data.slice(offset).toString(encoding), 'text/xml');
       const name: Element = xmlDoc.querySelector('fomod Name');
       return truthy(name)
-        ? {
-          customFileName: name.childNodes[0].nodeValue,
-        } : {};
+        ? Bluebird.resolve({ customFileName: name.childNodes[0].nodeValue })
+        : Bluebird.resolve({});
     })
-    .catch(() => ({}));
+    .catch(() => Bluebird.resolve({}));
 }
 
 function spawnAsync(command: string, args: string[]): Promise<void> {
@@ -292,10 +292,10 @@ async function installDotNet(api: IExtensionApi, repair: boolean): Promise<void>
   const downloadsPath = downloadPathForGame(state, SITE_ID);
   const fullPath = path.join(downloadsPath, download.localPath);
 
-  api.showDialog('info', '.NET is being installed', {
-    text: 'Please follow the instructions in the .NET installer. If you can\'t see the installer window, please check if it\'s hidden '
-        + 'behind another window.\n'
-        + 'Please note: In rare cases .NET will still not work until you restarted windows.',
+  api.showDialog('info', 'Microsoft .NET Desktop Runtime 6 is being installed', {
+    bbcode: 'Please follow the instructions in the .NET installer. If you can\'t see the installer window, please check if it\'s hidden behind another window.'
+    + '[br][/br][br][/br]'
+        + 'Please note: In rare cases you will need to restart windows before .NET works properly.',
   }, [
     { label: 'Ok' },
   ]);
@@ -310,6 +310,7 @@ async function installDotNet(api: IExtensionApi, repair: boolean): Promise<void>
 }
 
 async function checkNetInstall(api: IExtensionApi): Promise<ITestResult> {
+  
   if (process.platform !== 'win32') {
     // currently only supported/tested on windows
     onFoundDotNet();
@@ -323,6 +324,7 @@ async function checkNetInstall(api: IExtensionApi): Promise<ITestResult> {
     proc.stderr.on('data', dat => stderr += dat.toString());
   });
 
+  
   if (exitCode === 0) {
     onFoundDotNet();
     return Promise.resolve(undefined);
@@ -330,12 +332,14 @@ async function checkNetInstall(api: IExtensionApi): Promise<ITestResult> {
 
   const result: ITestResult = {
     description: {
-      short: 'Microsoft .NET installation required',
-      long: 'Vortex requires Microsoft .NET to perform important tasks.'
-        + '[br][/br]Click "Fix" below to install the required version.'
-        + '[br][/br]If you already have Microsoft .NET 6 or later installed, there may be a problem with your installation, '
-        + 'please click below for technical details.'
-        + '[br][/br][spoiler label="Show details"]{{stderr}}[/spoiler][/quote]',
+      short: 'Microsoft .NET Desktop Runtime 6 required',
+      long: 'Vortex requires .NET Desktop Runtime 6 to be installed even though you may already have a newer version. This is due to incompatible changes in the more recent versions.'
+        + '[br][/br][br][/br]'
+        + 'If you already have .NET Desktop Runtime 6 installed then there may be a problem with your installation and a reinstall might be needed.'
+        + '[br][/br][br][/br]'
+        + 'Click "Fix" below to install the required version.'
+        + '[br][/br][br][/br]'
+        + '[spoiler label="Show detailed error"]{{stderr}}[/spoiler]',
       replace: { stderr: stderr.replace('\n', '[br][/br]') },
     },
     automaticFix: () => Bluebird.resolve(installDotNet(api, false)),
@@ -596,7 +600,7 @@ class ConnectionIPC {
             wasConnected = true;
           }
           return Promise.resolve();
-        }, 100);
+        }, 1000);
 
         const onStdout = (dat: string) => {
           msg += dat;
@@ -876,7 +880,6 @@ class ConnectionIPC {
     }
     this.mSocket?.in?.end();
 
-    log('warn', 'interrupted, recent actions', JSON.stringify(this.mActionLog, undefined, 2));
     if (this.mOnInterrupted !== undefined) {
       this.mOnInterrupted(err);
       this.mOnInterrupted = undefined;

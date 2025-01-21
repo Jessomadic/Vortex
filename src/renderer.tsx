@@ -92,7 +92,7 @@ import * as I18next from 'i18next';
 import * as nativeErr from 'native-errors';
 import * as React from 'react';
 import { DndProvider } from 'react-dnd';
-import HTML5Backend from 'react-dnd-html5-backend';
+import { HTML5Backend } from 'react-dnd-html5-backend';
 import * as ReactDOM from 'react-dom';
 import { I18nextProvider } from 'react-i18next';
 import { Provider } from 'react-redux';
@@ -228,6 +228,7 @@ const middleware = [
 ];
 
 function sanityCheckCB(err: StateError) {
+  err['attachLogOnReport'] = true;
   showError(store.dispatch,
     'An invalid state change was prevented, this was probably caused by a bug', err);
 }
@@ -313,6 +314,12 @@ function errorHandler(evt: any) {
     return;
   }
 
+  if (error.stack.includes('packery')) {
+    // seems to be caused by an event triggered inside packery after cleanup so I don't see
+    // a way to catch this cleanly
+    return;
+  }
+
   if (error.stack.includes('react-sortable-tree')) {
     // bug in external library. I know where the bug is but fixing that causes a new problem and
     // i just don't want to pull that thread.
@@ -342,6 +349,7 @@ function errorHandler(evt: any) {
       });
       extensions?.getApi()?.showErrorNotification?.('Unhandled exception in extension', error, {
         message: extName,
+        allowReport: false,
       });
       return;
     }
@@ -537,6 +545,10 @@ function init() {
 
   eventEmitter.on('start-download-url', (url: string, fileName?: string, install?: boolean) => {
     startDownloadFromURL(url, fileName, install);
+  });
+
+  eventEmitter.on('relaunch-application', (gameId: string, ) => {
+    relaunch(['--game', gameId]);
   });
 
   ipcRenderer.on(

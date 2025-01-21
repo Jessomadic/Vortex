@@ -66,9 +66,9 @@ class AboutPage extends ComponentEx<IProps, IComponentState> {
   public componentDidMount() {
     this.mMounted = true;
 
-    if (this.mVersion === '0.0.1') {
-      this.nextState.tag = 'Development';
-    } else {
+      // no longer have to ignore if development now that we have tag information as part of the package.json version
+      // this code hasn't changed, but we only show the date now next to version and not the changelog or tag
+
       github.releases()
         .then(releases => {
           if (this.mMounted) {
@@ -80,7 +80,9 @@ class AboutPage extends ComponentEx<IProps, IComponentState> {
                 this.nextState.changelog = thisRelease.body;
                 this.nextState.tag = thisRelease.prerelease ? 'Beta' : undefined;
               } else {
-                this.nextState.tag = 'Unknown';
+                // no release found on github, so it's packaged but not distributed properly yet
+                // this could be on the mystery Next repo for testing
+                this.nextState.tag = 'Preview';
               }
             } catch (err) {
               log('warn', 'Failed to parse release info', err.message);
@@ -90,7 +92,7 @@ class AboutPage extends ComponentEx<IProps, IComponentState> {
         .catch(err => {
           log('warn', 'Failed to look up current Vortex releases', err.message);
         });
-    }
+    
   }
 
   public componentWillUnmount() {
@@ -132,24 +134,14 @@ class AboutPage extends ComponentEx<IProps, IComponentState> {
               <Media.Left><Image className='vortex-logo' src={imgPath} /></Media.Left>
               <Media.Body>
                 <h2 className='media-heading'>
-                  Vortex {this.mVersion}
-                  {(tag !== undefined) ? ' ' + tag : ''}
+                  Vortex {this.mVersion} {releaseDate !== undefined ? `(${releaseDate.toLocaleDateString(I18next.language)})` : ''}
                 </h2>
-                <p>&#169;2022 Black Tree Gaming Ltd.</p>
+                <p>&#169;2024 Black Tree Gaming Ltd.</p>
                 <p>
                   {t('Released under')}
                   {' '}<a onClick={this.showOwnLicense}>GPL-3</a>{' '}
                   {t('License')}
-                </p>
-                {(releaseDate !== undefined) ? (
-                  <div>
-                    {t('Released on {{date}}', { replace:
-                      { date: releaseDate.toLocaleDateString(I18next.language) } })}
-                    <More id='about-vortex-changelog' name='Changelog'>
-                      {changelog}
-                    </More>
-                 </div>
-                 ) : null}
+                </p>                
               </Media.Body>
             </Media>
             <p><strong>Electron</strong> {(process.versions as any).electron}</p>

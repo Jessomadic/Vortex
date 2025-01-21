@@ -51,7 +51,7 @@ export const addDialog = safeCreateAction(
  */
 export const dismissDialog = safeCreateAction('DISMISS_MODAL_DIALOG', identity);
 
-const timers = local<{ [id: string]: NodeJS.Timer }>('notification-timers', {});
+const timers = local<{ [id: string]: NodeJS.Timeout }>('notification-timers', {});
 
 type NotificationFunc = (dismiss: NotificationDismiss) => void;
 const notificationActions = local<{ [id: string]: NotificationFunc[] }>('notification-actions', {});
@@ -80,7 +80,7 @@ export function fireNotificationAction(notiId: string, notiProcess: string,
 
 if (ipcMain !== undefined) {
   ipcMain.on('fire-notification-action',
-             (event: Electron.Event, notiId: string, action: number) => {
+             (event: any, notiId: string, action: number) => {
     const func = notificationActions[notiId]?.[action];
     let res = false;
     if (func !== undefined) {
@@ -88,11 +88,12 @@ if (ipcMain !== undefined) {
         res = true;
       });
     }
+
     event.returnValue = res;
   });
 
   ipcMain.on('fire-dialog-action',
-             (event: Electron.Event, dialogId: string, action: string, input: any) => {
+             (event: any, dialogId: string, action: string, input: any) => {
     const func = DialogCallbacks.instance()[dialogId];
     if (func !== undefined) {
       func(action, input);

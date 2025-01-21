@@ -12,7 +12,9 @@ import { IProfile, IState } from '../../../types/api';
 import * as selectors from '../../../util/selectors';
 import { getSafe } from '../../../util/storeHelper';
 
-import { setFBLoadOrderEntry } from '../actions/loadOrder';
+import { setFBLoadOrder, setFBLoadOrderEntry } from '../actions/loadOrder';
+
+import { LoadOrderIndexInput } from './loadOrderIndex';
 
 interface IConnectedProps {
   modState: any;
@@ -22,6 +24,7 @@ interface IConnectedProps {
 
 interface IActionProps {
   onSetLoadOrderEntry: (profileId: string, entry: ILoadOrderEntry) => void;
+  onSetLoadOrder: (profileId: string, loadOrder: LoadOrder) => void;
 }
 
 interface IBaseProps {
@@ -33,8 +36,10 @@ type IProps = IBaseProps & IConnectedProps & IActionProps;
 
 class ItemRenderer extends ComponentEx<IProps, {}> {
   public render() {
-    const item = this.props.item.loEntry;
-    const displayCheckboxes = this.props.item.displayCheckboxes;
+    const item = Array.isArray(this.props.item)
+      ? this.props.item[0].loEntry
+      : this.props.item.loEntry;
+    const displayCheckboxes = this.props.item.displayCheckboxes ?? false;
     return this.renderDraggable(item, displayCheckboxes);
   }
 
@@ -67,8 +72,6 @@ class ItemRenderer extends ComponentEx<IProps, {}> {
     const { loadOrder, className } = this.props;
     const key = !!item.name ? `${item.name}` : `${item.id}`;
 
-    const position = loadOrder.findIndex(entry => entry.id === item.id) + 1;
-
     let classes = ['load-order-entry'];
     if (className !== undefined) {
       classes = classes.concat(className.split(' '));
@@ -100,12 +103,20 @@ class ItemRenderer extends ComponentEx<IProps, {}> {
         className={classes.join(' ')}
         ref={this.props.item.setRef}
       >
-        <p className='load-order-index'>{position}</p>
+        <Icon className='drag-handle-icon' name='drag-handle'/>
+        <LoadOrderIndexInput
+          className='load-order-index'
+          api={this.context.api}
+          item={item}
+          currentPosition={this.currentPosition()}
+          lockedEntriesCount={this.lockedEntriesCount()}
+          loadOrder={loadOrder}
+          isLocked={this.isLocked}
+          onApplyIndex={this.onApplyIndex}
+        />
         {this.renderValidationError()}
-        <div>
-          <p className='load-order-name'>{key}</p>
-          {this.renderExternalBanner(item)}
-        </div>
+        <p className='load-order-name'>{key}</p>
+        {this.renderExternalBanner(item)}
         {checkBox()}
         {lock()}
       </ListGroupItem>
@@ -128,6 +139,34 @@ class ItemRenderer extends ComponentEx<IProps, {}> {
     };
     onSetLoadOrderEntry(profile.id, entry);
   }
+
+  private currentPosition = (): number => {
+    const { item, loadOrder } = this.props;
+    return loadOrder.findIndex(entry => entry.id === item.loEntry.id) + 1;
+  }
+
+  private onApplyIndex = (idx: number) => {
+    const { item, onSetLoadOrder, profile, loadOrder } = this.props;
+    const currentIdx = this.currentPosition();
+    if (currentIdx === idx) {
+      return;
+    }
+
+    const entry = {
+      ...item.loEntry,
+      index: idx,
+    };
+
+    const newLO = loadOrder.filter((entry) => entry.id !== item.loEntry.id);
+    newLO.splice(idx - 1, 0, entry);
+    onSetLoadOrder(profile.id, newLO);
+  }
+
+  private lockedEntriesCount = (): number => {
+    const { loadOrder } = this.props;
+    const locked = loadOrder.filter(item => this.isLocked(item));
+    return locked.length;
+  }
 }
 
 const empty = {};
@@ -144,6 +183,8 @@ function mapDispatchToProps(dispatch: any): IActionProps {
   return {
     onSetLoadOrderEntry: (profileId, entry) =>
       dispatch(setFBLoadOrderEntry(profileId, entry)),
+    onSetLoadOrder: (profileId, loadOrder) =>
+      dispatch(setFBLoadOrder(profileId, loadOrder)),
   };
 }
 

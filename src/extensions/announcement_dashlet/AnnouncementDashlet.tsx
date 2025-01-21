@@ -14,6 +14,12 @@ import * as selectors from '../../util/selectors';
 
 import { EmptyPlaceholder, FlexLayout } from '../../controls/api';
 import { AnnouncementSeverity, IAnnouncement } from './types';
+import ReactMarkdown from 'react-markdown';
+
+import dayjs from 'dayjs';
+import relativeTimePlugin from 'dayjs/plugin/relativeTime' // import plugin
+
+dayjs.extend(relativeTimePlugin);
 
 interface IConnectedProps {
   gameMode: string;
@@ -23,7 +29,9 @@ interface IConnectedProps {
 type IProps = WithTranslation & IConnectedProps;
 
 class AnnouncementDashlet extends ComponentEx<IProps, {}> {
+
   private mAppVersion: string;
+
   constructor(props: IProps) {
     super(props);
     this.mAppVersion = getApplication().version;
@@ -34,16 +42,14 @@ class AnnouncementDashlet extends ComponentEx<IProps, {}> {
 
     // Filter announcements by gamemode and version.
     const filtered = announcements
-      .filter(announce => matchesGameMode(announce, gameMode)
+      .filter(announce => matchesGameMode(announce, gameMode, true)
                        && matchesVersion(announce, this.mAppVersion))
       .sort((lhs, rhs) => new Date(rhs.date).getTime()
                         - new Date(lhs.date).getTime());
     return (
       <Dashlet className='dashlet-announcement' title={t('Announcements')}>
-        <div className='list-announcements-container'>
           {filtered.length > 0 ? this.renderContent(filtered) : this.renderPlaceholder()}
-        </div>
-      </Dashlet>
+      </Dashlet>      
     );
   }
 
@@ -84,7 +90,7 @@ class AnnouncementDashlet extends ComponentEx<IProps, {}> {
   private severityToIcon(severity: AnnouncementSeverity): string {
     switch (severity) {
       case 'warning': return 'feedback-warning';
-      case 'critical': return 'feedback-warning';
+      case 'critical': return 'dialog-error';
     }
     return undefined;
   }
@@ -112,16 +118,31 @@ class AnnouncementDashlet extends ComponentEx<IProps, {}> {
       );
     };
 
-    const generateDate = (): JSX.Element => (
+    const renderDate = (): JSX.Element => (
+      <div title={dayjs(announcement.date).toString()}>
+        { dayjs().to(announcement.date) }
+      </div>
+    );
+
+    const renderTitle = (): JSX.Element => (
+      <div className='announcement-title'>
+        {announcement.title !== undefined ? announcement.title : this.severityToTooltip(t, announcement.severity)}
+      </div>
+    );
+
+    const renderLink = (): JSX.Element => (
       <div>
-        {new Date(announcement.date).toLocaleDateString(this.context.api.locale())}
+        {announcement.link !== undefined ? generateLinkButton() : null}
       </div>
     );
 
     return (
       <FlexLayout type='row' className='announcement-extras'>
-        {generateDate()}
-        {announcement.link !== undefined ? generateLinkButton() : null}
+        {this.renderIcon(announcement)}
+        {renderTitle()}
+        <div className='flex-fill' />
+        {renderDate()}
+        {renderLink()}
       </FlexLayout>
     );
   }
@@ -130,27 +151,26 @@ class AnnouncementDashlet extends ComponentEx<IProps, {}> {
     const { t } = this.props;
     return (
       <FlexLayout type='row' className='announcement-description'>
-        {this.renderIcon(announcement)}
-        <p>{announcement.description}</p>
+        
+        <ReactMarkdown allowedElements={['p', 'a', 'em', 'strong']} unwrapDisallowed={true} >
+            {announcement.description}
+        </ReactMarkdown>       
       </FlexLayout>
     );
   }
 
   private renderContent(filtered: IAnnouncement[]) {
-    const renderElement = (announcement: IAnnouncement, id: number): JSX.Element => {
-      return (
-        <li key={id} className='announcement-list-item'>
-            <FlexLayout type='column'>
-              {this.generateDescription(announcement)}
-              {this.generateExtraPanel(announcement)}
-            </FlexLayout>
-        </li>);
-    };
-
     return (
-      <ul className='list-announcements'>
-        {filtered.map((announcement, id) => renderElement(announcement, id))}
-      </ul>
+      <div className='announcements-container'>
+        {
+        filtered.map((announcement, id) => (
+          <div className='announcement-entry' key={id}>
+            {this.generateExtraPanel(announcement)}
+            {this.generateDescription(announcement)}
+          </div>
+        ))
+        }
+      </div>
     );
   }
 }

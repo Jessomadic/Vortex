@@ -1,4 +1,5 @@
-import { setDownloadModInfo, setModAttribute } from '../../actions';
+/* eslint-disable */
+import { setDownloadModInfo, setForcedLogout, setModAttribute } from '../../actions';
 import { IDialogResult, showDialog } from '../../actions/notifications';
 import { IExtensionApi, IExtensionContext } from '../../types/IExtensionContext';
 import { IModLookupResult } from '../../types/IModLookupResult';
@@ -16,7 +17,7 @@ import opn from '../../util/opn';
 import presetManager from '../../util/PresetManager';
 import { activeGameId, downloadPathForGame, gameById, knownGames } from '../../util/selectors';
 import { currentGame, getSafe } from '../../util/storeHelper';
-import { batchDispatch, decodeHTML, nexusModsURL, Section, truthy } from '../../util/util';
+import { batchDispatch, decodeHTML, nexusModsURL, Section, truthy, Source, Campaign } from '../../util/util';
 
 import { ICategoryDictionary } from '../category_management/types/ICategoryDictionary';
 import { DownloadIsHTML } from '../download_management/DownloadManager';
@@ -29,7 +30,7 @@ import { SITE_ID } from '../gamemode_management/constants';
 import { isDownloadIdValid, isIdValid } from '../mod_management/util/modUpdateState';
 
 import { setNewestVersion, setUserInfo } from './actions/persistent';
-import { addFreeUserDLItem, removeFreeUserDLItem } from './actions/session';
+import { addFreeUserDLItem, removeFreeUserDLItem, setOauthPending } from './actions/session';
 import { setAssociatedWithNXMURLs } from './actions/settings';
 import { accountReducer } from './reducers/account';
 import { persistentReducer } from './reducers/persistent';
@@ -46,6 +47,7 @@ import GoPremiumDashlet from './views/GoPremiumDashlet';
 import LoginDialog from './views/LoginDialog';
 import LoginIcon from './views/LoginIcon';
 import { } from './views/Settings';
+import * as semver from 'semver';
 
 import {
   genCollectionIdAttribute,
@@ -80,8 +82,11 @@ import {} from 'uuid';
 import { IComponentContext } from '../../types/IComponentContext';
 import { MainContext } from '../../views/MainWindow';
 import { getGame } from '../gamemode_management/util/getGame';
+import { selectors } from 'vortex-api';
+import { app } from 'electron';
 
 let nexus: NexusT;
+let userInfoDebouncer: Debouncer;
 
 export class APIDisabled extends Error {
   constructor(instruction: string) {
@@ -106,8 +111,10 @@ const requestFuncs = new Set([
   'publishRevision', 'attachCollectionsToCategory', 'getCollectionGraph',
   'getCollectionListGraph', 'getCollectionRevisionGraph', 'getRevisionUploadUrl',
   'endorseCollection', 'rateRevision', 'getCollectionVideo', 'getOwnIssues',
-  'sendFeedback',
+  'sendFeedback'
 ]);
+
+
 
 class Disableable {
   private mDisabled = false;
@@ -172,7 +179,6 @@ class Disableable {
           return prom
             .then((userInfo) => {
               if (truthy(userInfo)) {
-                that.mApi.store.dispatch(setUserInfo(transformUserInfo(userInfo)));
                 that.mApi.events.emit('did-login', null);
               }
               return obj[prop](...args);
@@ -308,7 +314,7 @@ function retrieveCategories(api: IExtensionApi, isUpdate: boolean) {
         'You are not logged in to Nexus Mods!', { allowReport: false });
     } else {
       let gameId;
-      currentGame(api.store)
+      return currentGame(api.store)
         .then((game: IGameStored) => {
           gameId = game.id;
           const nexusId = nexusGameId(game);
@@ -383,7 +389,7 @@ function retrieveCategories(api: IExtensionApi, isUpdate: boolean) {
 
 function openNexusPage(state: IState, gameIds: string[]) {
   const game = gameById(state, gameIds[0]);
-  opn(`https://www.${NEXUS_DOMAIN}/${nexusGameId(game)}`).catch(err => undefined);
+  opn(`${NEXUS_BASE_URL}/${nexusGameId(game)}`).catch(err => undefined);
 }
 
 function remapCategory(state: IState, category: number, fromGame: string, toGame: string) {
@@ -462,7 +468,13 @@ function processAttributes(state: IState, input: any, quick: boolean): Promise<a
             return undefined;
           });
       } else if (truthy(revisionNumber) || truthy(revisionId)) {
-        fetchPromise = getCollectionInfo(nexus, collectionSlug, revisionNumber, revisionId);
+        fetchPromise = getCollectionInfo(nexus, collectionSlug, revisionNumber, revisionId)
+          .catch(err => {
+            const errorLevel = ['COLLECTION_UNDER_MODERATION', 'NOT_FOUND'].includes(err.code) ? 'warn' : 'error';
+            log(errorLevel, 'failed to fetch nexus info about collection', {
+              gameId, collectionSlug, revisionNumber, error: err.message });
+            return undefined;
+          });
       }
     }
   }
@@ -563,7 +575,19 @@ function makeNXMLinkCallback(api: IExtensionApi) {
         .find(iter => iter.modId === nxmUrl.modId) !== undefined;
 
       if (nxmUrl.type === 'oauth') {
-        return oauthCallback(api, nxmUrl.oauthCode, nxmUrl.oauthState);
+        try {
+          return oauthCallback(api, nxmUrl.oauthCode, nxmUrl.oauthState);
+        } catch (err) {
+          // ignore unexpected code
+        }
+      } else if (nxmUrl.type === 'premium') {        
+        try {
+          log('info', 'makeNXMLinkCallback() premium');          
+          userInfoDebouncer.schedule();
+          return false;
+        } catch (err) {
+          // ignore unexpected code
+        }
       } else if ((nxmUrl.gameId === SITE_ID) && isExtAvailable) {
         if (install) {
           return api.emitAndAwait('install-extension',
@@ -696,23 +720,29 @@ function makeRepositoryLookup(api: IExtensionApi, nexusConn: NexusT) {
       .then(() => {
         return nexusConn.modFilesByUid(query,
           processingQueries.map(iter => makeFileUID(iter.repoInfo)) as any[])
-        .then((files: IModFile[]) => {
-        processingQueries.forEach(item => {
-          const uid = makeFileUID(item.repoInfo);
-          const res = files.find(iter => iter['uid'] === uid);
-          if (res !== undefined) {
-            item.resolve(res);
-          } else {
-            // the number of uids we can request in one call may be limited, just retry.
-            // We're supposed to get an error if the request actually failed.
-            pendingQueries.push(item);
-          }
-        });
-        if (pendingQueries.length > 0) {
-          uidLookupDebouncer.schedule();
-        }
+          .then((files: IModFile[]) => {
+            processingQueries.forEach(item => {
+              const uid = makeFileUID(item.repoInfo);
+              const res = files.find(iter => iter['uid'] === uid);
+              if (res !== undefined) {
+                item.resolve(res);
+              } else {
+                // the number of uids we can request in one call may be limited, just retry.
+                // We're supposed to get an error if the request actually failed.
+                pendingQueries.push(item);
+              }
+            });
+          }).catch(err => {
+            processingQueries.forEach(item => {
+              item.reject(err);
+            });
+          })
+          .finally(() =>{
+            if (pendingQueries.length > 0) {
+              uidLookupDebouncer.schedule();
+            }
+          });
       });
-    });
   }, 100, true);
 
   const queue = (repoInfo: IModRepoId): Promise<Partial<IModFile>> => {
@@ -747,7 +777,7 @@ function makeRepositoryLookup(api: IExtensionApi, nexusConn: NexusT) {
               author: modFileInfo.mod.author,
               category: (modFileInfo.mod.modCategory.id.toString()).split(',')[0],
               description: modFileInfo.description,
-              homepage: `https://www.${NEXUS_DOMAIN}/${repoInfo.gameId}/mods/${modId}`,
+              homepage: `${NEXUS_BASE_URL}/${repoInfo.gameId}/mods/${modId}`,
             },
           },
         };
@@ -860,7 +890,7 @@ function extendAPI(api: IExtensionApi, nexus: NexusT): INexusAPIExtension
     nexusModUpdate: eh.onModUpdate(api, nexus),
     nexusOpenCollectionPage: eh.onOpenCollectionPage(api),
     nexusOpenModPage: eh.onOpenModPage(api),
-    nexusRequestNexusLogin: callback => requestLogin(api, callback),
+    nexusRequestNexusLogin: callback => requestLogin(nexus, api, callback),
     nexusRequestOwnIssues: eh.onRequestOwnIssues(nexus),
     nexusRetrieveCategoryList: (isUpdate: boolean) => retrieveCategories(api, isUpdate),
     nexusGetModFiles: eh.onGetModFiles(api, nexus),
@@ -869,11 +899,13 @@ function extendAPI(api: IExtensionApi, nexus: NexusT): INexusAPIExtension
 }
 
 function once(api: IExtensionApi, callbacks: Array<(nexus: NexusT) => void>) {
+
   const registerFunc = (def?: boolean) => {
     if (def === undefined) {
       api.store.dispatch(setAssociatedWithNXMURLs(true));
     }
 
+    // main entry point for nxm protocol links to be handled 
     if (api.registerProtocol('nxm', def !== false, makeNXMLinkCallback(api))) {
       api.sendNotification({
         type: 'info',
@@ -901,8 +933,16 @@ function once(api: IExtensionApi, callbacks: Array<(nexus: NexusT) => void>) {
 
     const Nexus: typeof NexusT = require('@nexusmods/nexus-api').default;
     const apiKey = state.confidential.account?.['nexus']?.['APIKey'];
-    const oauthCred = state.confidential.account?.['nexus']?.['OAuthCredentials'];
-    log('info', 'init api key', { isUndefined: apiKey !== undefined });
+    const oauthCred = state.confidential.account?.['nexus']?.['OAuthCredentials']; // get credentials from state - this only happens once when extension is loading
+    const loggedIn = (apiKey !== undefined) || (oauthCred !== undefined);
+
+
+    log('info', 'nexus_integration auth state status', {
+      apiKey: apiKey !== undefined,
+      oauthCred: oauthCred !== undefined,
+      loggedIn: loggedIn
+    });
+
     const gameMode = activeGameId(state);
 
     nexus = new Proxy(
@@ -915,10 +955,56 @@ function once(api: IExtensionApi, callbacks: Array<(nexus: NexusT) => void>) {
     nexus.setLogger((level: LogLevel, message: string, meta: any) =>
       log(level, message, meta));
 
-    if (oauthCred !== undefined) {
-      updateToken(api, nexus, oauthCred);
+
+    /**
+     * this has probably been set from an application level migration, and so we should show the dialog
+     * about what happened and why
+     */
+
+    const forcedLogout = state.confidential.account?.['nexus']?.['ForcedLogout'] ?? false;
+
+    log('info', 'nexus_integration forcedLogout', {
+      forcedLogout: forcedLogout
+    });
+
+    if (forcedLogout) {
+
+      // show dialog to explain whats going on
+      api.showDialog(
+        'info',
+        'You have been logged out', {
+        text: 'Due to an update with how Vortex communicates with Nexus Mods you will need to log back into your account.\n\n' +
+          'This change will allow Vortex to better keep your account details in sync without requiring you to log out and back in again or restart the app.',
+      }, [
+        {
+          label: 'Dismiss',
+          action: () => {
+            log('info', 'dismiss dialog');
+          }
+        },
+        {
+          label: 'Login',
+          action: () => {
+            log('info', 'log in about now?!');
+            ensureLoggedIn(api);
+          },
+          default: true
+        },
+      ],
+      );
+
+      // set flag so we don't do this everytime
+      api.store.dispatch(setForcedLogout(false));
+
     } else {
-      updateKey(api, nexus, apiKey);
+
+      // check to see if we have oauth credentials in state, if so, then we need to update nexus-node
+      if (oauthCred !== undefined) {
+        log('info', 'OAuth credentials found in state. updating nexus-node credentials');
+        updateToken(api, nexus, oauthCred);
+      } else {
+        //updateKey(api, nexus, apiKey);
+      }
     }
 
     registerFunc(getSafe(state, ['settings', 'nexus', 'associateNXM'], undefined));
@@ -931,6 +1017,12 @@ function once(api: IExtensionApi, callbacks: Array<(nexus: NexusT) => void>) {
           allowReport: false,
         });
       });
+
+    // register when window is focussed to do a userinfo check?  
+    getApplication().window.on('focus', (event, win) => {
+      //console.log('browser-window-focus');         
+      //userInfoDebouncer.schedule();
+    })
   }
 
   api.onAsync('check-mods-version', eh.onCheckModsVersion(api, nexus));
@@ -944,13 +1036,14 @@ function once(api: IExtensionApi, callbacks: Array<(nexus: NexusT) => void>) {
   api.onAsync('endorse-nexus-mod', eh.onEndorseDirect(api, nexus));
   api.onAsync('get-latest-mods', eh.onGetLatestMods(api, nexus));
   api.onAsync('get-trending-mods', eh.onGetTrendingMods(api, nexus));
+  api.events.on('refresh-user-info', eh.onRefreshUserInfo(nexus, api));
   api.events.on('endorse-mod', eh.onEndorseMod(api, nexus));
   api.events.on('submit-feedback', eh.onSubmitFeedback(nexus));
   api.events.on('submit-collection', eh.onSubmitCollection(nexus));
   api.events.on('mod-update', eh.onModUpdate(api, nexus));
   api.events.on('open-collection-page', eh.onOpenCollectionPage(api));
   api.events.on('open-mod-page', eh.onOpenModPage(api));
-  api.events.on('request-nexus-login', callback => requestLogin(api, callback));
+  api.events.on('request-nexus-login', callback => requestLogin(nexus, api, callback));
   api.events.on('request-own-issues', eh.onRequestOwnIssues(nexus));
   api.events.on('retrieve-category-list', (isUpdate: boolean) => {
     retrieveCategories(api, isUpdate);
@@ -1011,7 +1104,7 @@ function toolbarBanner(t: TFunction): React.FunctionComponent<any> {
         <div className='right-center'>
           <Button
             bsStyle='ad'
-            data-campaign='Header-Ad'
+            data-campaign={Source.HeaderAd}
             onClick={trackAndGoToPremium}
           >
             {t('Go Premium')}
@@ -1023,8 +1116,12 @@ function toolbarBanner(t: TFunction): React.FunctionComponent<any> {
 }
 
 function goBuyPremium(evt: React.MouseEvent<any>) {
-  const campaign = evt.currentTarget.getAttribute('data-campaign');
-  opn(nexusModsURL(PREMIUM_PATH, { section: Section.Users, campaign })).catch(err => undefined);
+  const source = evt.currentTarget.getAttribute('data-campaign');
+  opn(nexusModsURL(PREMIUM_PATH, { 
+    section: Section.Users, 
+    campaign: Campaign.BuyPremium,
+    source
+   })).catch(err => undefined);
 }
 
 function idValid(thingId: string,
@@ -1250,6 +1347,10 @@ function makeNXMProtocol(api: IExtensionApi, onAwaitLink: AwaitLinkCB) {
       return Promise.reject(err);
     }
 
+    log('warn', 'userInfo checking for downloads?');
+
+
+
     const userInfo: any = getSafe(state, ['persistent', 'nexus', 'userInfo'], undefined);
     if ((url.userId !== undefined) && (url.userId !== userInfo?.userId)) {
       const userName: string =
@@ -1265,8 +1366,20 @@ function makeNXMProtocol(api: IExtensionApi, onAwaitLink: AwaitLinkCB) {
         && (url.type === 'mod')
         && (url.gameId !== SITE_ID)
         && (url.key === undefined)) {
+
+          log('info', 'free user stuff', {
+            input: input, 
+            url: JSON.stringify(url),
+            name: name, 
+            friendlyName: friendlyName
+          });
       return freeUserDownload(input, url, name, friendlyName);
     } else {
+      
+      log('info', 'premium user stuff', {
+        input: input, 
+        url: JSON.stringify(url)
+      });
       return premiumUserDownload(input, url);
     }
   };
@@ -1309,6 +1422,45 @@ function onSkip(inputUrl: string) {
   }
 }
 
+function onRetryImpl(resolveFunc: ResolveFunc, api: IExtensionApi, inputUrl: string) {
+  const queueItem = freeDLQueue.find(iter => iter.input === inputUrl);
+  if (queueItem === undefined) {
+    log('error', 'failed to find queue item', { inputUrl, queue: JSON.stringify(freeDLQueue) });
+    return;
+  }   
+  
+  const { url } = queueItem;  
+
+
+  resolveFunc(queueItem.input)
+        .then(queueItem.res)
+        .catch(queueItem.rej);
+
+    
+
+        /*
+  const awaitedLink = {
+    gameId: url.gameId,
+    modId: url.modId,
+    fileId: url.fileId,
+    resolve: (resUrl: string) =>
+      resolveFunc(resUrl, queueItem.name, queueItem.friendlyName)
+        .then(queueItem.res)
+        .catch(queueItem.rej),
+  };
+  */
+
+  //awaitedLinks.push(awaitedLink);
+
+  console.log('queueItem', JSON.stringify(queueItem));
+  //console.log('awaitedLink', JSON.stringify(awaitedLink));
+}
+
+function onCheckStatusImpl() {
+
+  userInfoDebouncer.schedule();
+}
+
 function onCancelImpl(api: IExtensionApi, inputUrl: string): boolean {
   const copy = freeDLQueue.slice(0);
   if (copy.length !== 0) {
@@ -1323,12 +1475,44 @@ function onCancelImpl(api: IExtensionApi, inputUrl: string): boolean {
 }
 
 function init(context: IExtensionContextExt): boolean {
+
   context.registerReducer(['confidential', 'account', 'nexus'], accountReducer);
   context.registerReducer(['settings', 'nexus'], settingsReducer);
   context.registerReducer(['persistent', 'nexus'], persistentReducer);
   context.registerReducer(['session', 'nexus'], sessionReducer);
-
   context.registerAction('application-icons', 200, LoginIcon, {}, () => ({ nexus }));
+  context.registerAction('mods-action-icons', 800, 'open-ext', {}, 'Open Source Website', ids => {
+    const state: IState = context.api.getState();
+    const gameMode = activeGameId(state);
+    if (gameMode === undefined) {
+      return;
+    }
+
+    for (const id of ids) {
+      const mod = getSafe(state, ['persistent', 'mods', gameMode, id], undefined);
+      if (!mod || !mod.attributes?.url) {
+        return;
+      }
+
+      opn(mod.attributes.url).catch(err => null);
+    }
+  }, ids => {
+    const state: IState = context.api.getState();
+    const gameMode = activeGameId(state);
+    if (gameMode === undefined) {
+      return false;
+    }
+    let supported = true;
+    for (const id of ids) {
+      const mod = getSafe(state, ['persistent', 'mods', gameMode, id], undefined);
+      if (!mod || mod?.attributes?.source !== 'website') {
+        supported = false;
+        continue;
+      }
+    }
+
+    return supported;
+  })
   context.registerAction('mods-action-icons', 999, 'nexus', {}, 'Open on Nexus Mods',
                          instanceIds => {
     const state: IState = context.api.store.getState();
@@ -1381,6 +1565,38 @@ function init(context: IExtensionContextExt): boolean {
 
   const tracking = new Tracking(context.api);
 
+  /*
+  context.registerAction('global-icons', 100, 'feedback', {}, 'Clear OAuth State', () => {
+    log('info', 'Clear OAuth State');
+    context.api.store.dispatch(clearOAuthCredentials(null));
+  });*/
+
+  
+  userInfoDebouncer = new Debouncer(() => {
+    
+    //console.log('userinfodevbouncer debouncer');
+
+    if(!sel.isLoggedIn(context.api.getState())) {
+      log('warn', 'Not logged in');
+      return Promise.resolve();
+    }
+
+    context.api.events.emit('refresh-user-info');
+    return Promise.resolve();
+  }, 1000, true, true);
+
+  context.registerAction('global-icons', 100, 'nexus', {}, 'Refresh User Info', () => {
+    log('info', 'Refresh User Info global menu item clicked');
+    userInfoDebouncer.schedule();    
+  });
+
+  /*
+  // DNU: was used for testing... no longer public
+  context.registerAction('global-icons', 100, 'nexus', {}, 'Force Token Refresh', () => {
+    log('info', 'Force Token Refresh');
+    nexus.handleJwtRefresh();  
+  });*/
+
   context.registerAction('mods-action-icons', 300, 'smart', {}, 'Fix missing IDs',
                          instanceIds => { fixIds(context.api, instanceIds); },
                          instanceIds => includesMissingMetaId(context.api, instanceIds));
@@ -1398,6 +1614,11 @@ function init(context: IExtensionContextExt): boolean {
 
   const resolveFunc = makeNXMProtocol(context.api,
     (gameId: string, modId: number, fileId: number) => new Promise(resolve => {
+      console.log('makeNXMProtocol', {
+        gameId:gameId,
+        modId:modId,
+        fileId:fileId
+       });
       awaitedLinks.push({ gameId, modId, fileId, resolve });
     }));
 
@@ -1410,11 +1631,16 @@ function init(context: IExtensionContextExt): boolean {
 
   context.registerDialog('login-dialog', LoginDialog, () => ({
     onCancelLogin,
+    onReceiveCode: (code: string, state: string) => oauthCallback(context.api, code, state),
   }));
 
   const onDownload = (inputUrl: string) => onDownloadImpl(resolveFunc, inputUrl);
 
   const onCancel = (inputUrl: string) => onCancelImpl(context.api, inputUrl);
+  
+  const onCheckStatus = () => onCheckStatusImpl();
+
+  const onRetry = (inputUrl: string) => onRetryImpl(resolveFunc, context.api, inputUrl);
 
   context.registerDialog('free-user-download', FreeUserDLDialog, () => ({
     t: context.api.translate,
@@ -1423,6 +1649,8 @@ function init(context: IExtensionContextExt): boolean {
     onDownload,
     onSkip,
     onCancel,
+    onRetry,
+    onCheckStatus
   }));
 
   context.registerBanner('downloads', () => {
@@ -1440,7 +1668,7 @@ function init(context: IExtensionContextExt): boolean {
           + 'Go Premium for uncapped download speeds')}
         <Button
           bsStyle='ad'
-          data-campaign='Downloads-Ad'
+          data-campaign={Source.DownloadsBannerAd}
           onClick={trackAndGoToPremium}
         >
           {t('Go Premium')}

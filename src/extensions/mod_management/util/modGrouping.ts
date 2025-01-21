@@ -7,7 +7,7 @@ import { coerce, compare, valid } from 'semver';
 
 function byModId(input: IModWithState[]): IModWithState[][] {
   const grouped = input.reduce((prev: { [modId: string]: IModWithState[] }, value) => {
-    const modId = getSafe(value, ['attributes', 'modId'], undefined);
+    const modId = value?.attributes?.modId ?? value?.attributes?.collectionSlug;
     if (prev[modId] === undefined) {
       prev[modId] = [];
     }
@@ -30,7 +30,15 @@ function fileMatch(lhs: IModWithState, rhs: IModWithState): boolean {
     return false;
   }
 
+  if ((lhs.attributes?.collectionSlug !== undefined)
+      || (rhs.attributes?.collectionSlug !== undefined)) {
+    // atm never group collections, we don't support having multiple revisions of a collection
+    // installed at the same time anyway
+    return false;
+  }
+
   if (truthy(lhs.attributes.newestFileId)
+      && truthy(lhs.attributes.modId !== undefined)
       && (lhs.attributes.newestFileId === rhs.attributes.newestFileId)) {
     return true;
   }
@@ -82,7 +90,7 @@ function newestFirst(lhs: IModWithState, rhs: IModWithState): number {
  */
 function byEnabled(input: IModWithState[]): IModWithState[][] {
   // put each enabled mod into its own group. Ideally there should only be one
-  const groups: IModWithState[][] = input.filter((mod => mod.enabled)).map(mod => [mod]);
+  const groups: IModWithState[][] = input.filter((mod => mod?.enabled === true)).map(mod => [mod]);
   // it is of course possible that no mod in input is enabled.
   if (groups.length === 0) {
     return [ input ];

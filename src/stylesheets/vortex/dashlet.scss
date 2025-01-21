@@ -1,8 +1,14 @@
 .dashlet {
-  border: $border-width solid rgba($border-color, 0.5);
+  border: $border-width solid $border-color;
   background-color: $brand-menu;
   padding: $half-gutter;
   height: 100%;
+
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+  border-radius: 8px;
+
   li {
     border: 0px;
     background-color: lighten($brand-menu, 5%);
@@ -36,6 +42,35 @@
   align-items: center;
 }
 
+.dashlet-mod-spotlights {
+
+  .dashlet-mod-spotlights-info p {
+    margin: 0px;
+    margin-bottom: 4px;
+  }
+
+  .dashlet-mod-spotlights-webview-container {
+    flex: auto;
+    background-color: $black;
+    border: $border-width solid $border-color;
+
+    webview {
+      width: 100%;
+      height: 100%;
+    }
+  }
+
+  .dashlet-mod-spotlights-button-container {
+    height: auto !important;
+    .btn-ghost {
+      height: fit-content;
+    }
+    .btn-ghost.right {
+      float: right
+    }
+  }
+}
+
 .dashlet-todo {
   li {
     display: flex;
@@ -44,18 +79,23 @@
   > div {
     overflow-y: hidden;
     overflow-x: auto;
-    display: flex;
-    padding-bottom: 10px;
+    display: flex;    
+    padding: 0;
+    margin: 0;
+    gap: 8px;
   }
 }
 
 .dashlet-news {
   display: flex;
   flex-direction: column;
+  gap: 8px;
+
   ul {
     margin-bottom: 0;
     padding: 0 4px;
   }
+
   .placeholder {
     height: 100%;
   }
@@ -122,6 +162,7 @@
     background-size: cover;
     background-position-x: 50%;
     z-index: 0;
+    border-radius: 8px;
   }
 
   .gopremium-widget-text {
@@ -130,48 +171,87 @@
 }
 
 .dashlet-announcement {
+
   display: flex;
   flex-direction: column;
+  gap: 8px;
 
-  .list-announcements {
+  .list-announcements,
+  .announcements-container {
+    display: flex;
+    flex-direction: column;
+    gap: 8px;
+
     overflow-y: auto;
     list-style: none;
+    padding: 0;
+    margin: 0;
 
-    padding: 0 4px;
 
-    .announcement-list-item {
+    .announcement-list-item,
+    .announcement-entry {
+
+      display: flex;
+      flex-direction: column;
+      gap: 8px;
+
+      .announcement-icon {
+        display: flex;
+        align-items: center;
+        //margin-right: 6px;
+
+        svg {
+          height: 2em;
+          width: 2em;
+        }
+      }        
+
+      .announcement-icon-critical {
+        fill: $brand-danger-lighter;
+      }
+    
+      .announcement-icon-warning {
+        fill: $brand-warning;
+      }
+
       .announcement-description {
-        padding: 0 8px;
+        padding: 0;
+        align-items: flex-start;       
 
-        .announcement-icon {
-          display: flex;
-          align-items: center;
-          margin-right: 4px;
+        p {
+          margin: 0;
 
-          svg {
-            height: 3em;
-            width: 3em;
+          a {
+            cursor: pointer;
           }
-        }
-
-        .announcement-icon-critical {
-          fill: $brand-danger;
-        }
-      
-        .announcement-icon-warning {
-          fill: $brand-warning;
         }
       }
 
-      background: $gray-lighter !important;
-      padding: 0 10px;
-      margin-bottom: 10px !important;
+      -webkit-user-select: all;
+      user-select: all;
+
+      border-radius: 4px;
+      border: 1px solid #1c1e1d;
+      //margin-right: 8px;
+      padding: 16px;
+      background-color: $brand-bg;
     }
 
     .announcement-extras {
-      justify-content: space-between;
-      padding: 8px !important;
+      //justify-content: space-between;
+      //padding: 8px !important;
+      gap: 8px;
       font-size: smaller;
+      align-items: center;
+
+      .announcement-title {
+        font-size: 1.3em;
+        font-weight: bold;
+      } 
+
+      .flex-fill {
+        flex: 1 1 0%
+      }
     }
   }
 }
@@ -198,6 +278,7 @@
   .dashlet-customize-btn {
     display: flex;
     justify-content: flex-end;
+    
 
     .btn {
       color: currentColor;
@@ -330,7 +411,7 @@
 .dashlet-recently-managed {
   .list-recently-managed {
     display: flex;
-    overflow-x: auto;
+    //overflow-x: auto;
     > * {
       margin: 0 8px;
     }
@@ -373,6 +454,12 @@
 
 .list-news {
   overflow-y: auto;
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+  padding: 0 8px 0 0;
+  margin: 0;
+
   img {
     max-width: 50%;
     margin: 5px;
@@ -403,7 +490,10 @@
   padding: 16px;
   width: 250px;
   max-width: 250px;
-  box-shadow: inset 0px 0px 2px rgba(0, 0, 0, 0.25);
+  box-shadow: none;
+  border-radius: 4px;
+  border: 1px solid #1c1e1d;
+  height: 100%;
 }
 
 .onboarding-card-image-container {
@@ -466,7 +556,7 @@
 }
 
 .onboarding-card-title {
-  font-family: 'Montserrat';
+  font-family: $font-family-base;
   text-transform: uppercase;
   font-size: 1em;
   font-weight: 600;
@@ -542,7 +632,7 @@
 }
 
 .onboarding-completed-card-header-text {
-  font-family: 'Montserrat';
+  font-family: $font-family-base;
 }
 
 .onboarding-completed-card-header-icon {

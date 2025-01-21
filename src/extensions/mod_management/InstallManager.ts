@@ -1,3 +1,4 @@
+/* eslint-disable */
 import { addLocalDownload, removeDownload, setDownloadHashByFile,
          setDownloadModInfo,
          startActivity, stopActivity } from '../../actions';
@@ -18,7 +19,7 @@ import { TFunction } from '../../util/i18n';
 import lazyRequire from '../../util/lazyRequire';
 import { log } from '../../util/log';
 import { prettifyNodeErrorMessage } from '../../util/message';
-import { activeProfile, downloadPathForGame, installPathForGame, knownGames, lastActiveProfileForGame, profileById } from '../../util/selectors';
+import { activeGameId, activeProfile, downloadPathForGame, gameProfiles, installPathForGame, knownGames, lastActiveProfileForGame, profileById } from '../../util/selectors';
 import { getSafe } from '../../util/storeHelper';
 import { batchDispatch, isPathValid, makeQueue, setdefault, toPromise, truthy } from '../../util/util';
 import walk from '../../util/walk';
@@ -72,6 +73,7 @@ import * as url from 'url';
 import * as modMetaT from 'modmeta-db';
 
 import { generate as shortid } from 'shortid';
+import { IInstallOptions } from './types/IInstallOptions';
 
 const {genHash} = lazyRequire<typeof modMetaT>(() => require('modmeta-db'));
 
@@ -163,9 +165,9 @@ class InstallManager {
   private mQueue: Bluebird<void>;
   private mDependencyInstalls: { [modId: string]: () => void } = {};
   private mDependencyDownloadsLimit: ConcurrencyLimiter =
-    new ConcurrencyLimiter(3);
+    new ConcurrencyLimiter(10);
   private mDependencyInstallsLimit: ConcurrencyLimiter =
-    new ConcurrencyLimiter(1);
+    new ConcurrencyLimiter(3);
   private mDependencyQueue = makeQueue<void>();
 
   constructor(api: IExtensionApi, installPath: (gameId: string) => string) {
@@ -382,11 +384,20 @@ class InstallManager {
       .then(() => withContext('Installing', baseName, () => ((forceGameId !== undefined)
         ? Bluebird.resolve(forceGameId)
         : queryGameId(api.store, downloadGameIds, modId))
-      .tap(gameId => {
+      .then(async gameId => {
         installGameId = gameId;
         if (installGameId === undefined) {
-          return Bluebird.reject(
+          return Promise.reject(
             new ProcessCanceled('You need to select a game before installing this mod'));
+        }
+        if (installGameId === 'site' && baseName.toLowerCase().includes('extension')) {
+          // Assumption here is that anything we try to install from the "Modding Tools"/"site" domain
+          //  that contains "extension" in its archive name is an extension... If a non-extension tool
+          //  contains "extension" in its archive name... well, that's not good but there's nothing we can
+          //  do without API providing a unique tag for us to identify Vortex extensions. (AFAIK we can't even query the existing tags from the website)
+          // Installation of non-Vortex tools with the extension basename will just install as a mod for
+          //  the current game which I guess should be fine.
+          return Promise.resolve(installGameId);
         }
         const state = api.getState();
         const games = knownGames(state);
@@ -397,27 +408,34 @@ class InstallManager {
           const installProfileId = lastActiveProfileForGame(state, installGameId);
           installProfile = profileById(state, installProfileId);
         }
-        return api.emitAndAwait('will-install-mod', gameId, archiveId, modId, fullInfo);
+        // TODO make the download first functionality optional
+        await api.emitAndAwait('will-install-mod', gameId, archiveId, modId, fullInfo);
+        return Bluebird.resolve(gameId);
       })
       // calculate the md5 hash here so we can store it with the mod meta information later,
       // otherwise we'd not remember the hash when installing from external file
       .tap(() => genHash(archivePath).then(hash => {
         archiveMD5 = hash.md5sum;
         archiveSize = hash.numBytes;
-        _.merge(fullInfo, {
-          download: {
-            fileMD5: archiveMD5,
-            size: archiveSize,
-          },
-        });
-      }).catch(() => null))
+        try {
+          _.merge(fullInfo, {
+            download: {
+              fileMD5: archiveMD5,
+              size: archiveSize,
+            },
+          });
+        } catch (err) {
+          // no operation
+        }
+    }))
       .then(gameId => {
         if (installGameId === 'site') {
           // install an already-downloaded extension
           return api.emitAndAwait('install-extension-from-download', archiveId)
             .then(() => Bluebird.reject(new UserCanceled()));
         }
-        installContext = new InstallContext(gameId, api, allowAutoDeploy);
+        const silent = unattended && allowAutoDeploy && enable;
+        installContext = new InstallContext(gameId, api, silent);
         installContext.startIndicator(baseName);
         let dlGame: string | string[] = getSafe(fullInfo, ['download', 'game'], gameId);
         if (Array.isArray(dlGame)) {
@@ -452,15 +470,25 @@ class InstallManager {
           }
           const modNameMatches = this.checkModNameExists(testModId, api, installGameId);
           const variantMatches = this.checkModVariantsExist(api, installGameId, archiveId);
-          const existingIds = (replacementChoice === 'variant')
+          const existingIds = ((replacementChoice === 'variant')
             ? modNameMatches
-            : Array.from(new Set([].concat(modNameMatches, variantMatches)));
+            : Array.from(new Set([].concat(modNameMatches, variantMatches))))
+            .filter(_ => _ !== undefined);
           if (existingIds.length === 0) {
             log('debug', '(nameloop) no existing ids', { testModId: testModId ?? '<undefined>' });
             return Promise.resolve(testModId);
           } else {
-            return this.queryUserReplace(api, existingIds, installGameId, ++variantCounter)
+            const installOptions: IInstallOptions = {
+              ...info,
+              unattended,
+              variantNumber: ++variantCounter,
+              fileList,
+            };
+            return this.queryUserReplace(api, existingIds, installGameId, installOptions)
               .then((choice: IReplaceChoice) => {
+                if (choice.id === undefined) {
+                  log('error', '(nameloop) no valid id selection', { testModId, modNameMatches, variantMatches });
+                }
                 testModId = choice.id;
                 replacementChoice = choice.replaceChoice;
                 if (choice.enable) {
@@ -856,6 +884,9 @@ class InstallManager {
 
   private augmentRules(api: IExtensionApi, gameId: string, mod: IMod): Bluebird<IRule[]> {
     const rules = (mod.rules ?? []).slice();
+    if (mod.attributes === undefined) {
+      return Bluebird.resolve(rules);
+    }
 
     return api.lookupModMeta({
       fileMD5: mod.attributes['fileMD5'],
@@ -864,7 +895,7 @@ class InstallManager {
     })
       .then(results => {
         rules.push(...(results[0]?.value?.rules ?? []));
-        return rules;
+        return Bluebird.resolve(rules);
       })
   }
 
@@ -1455,8 +1486,8 @@ class InstallManager {
       }
     }
 
-    log('debug', 'installer instructions',
-        JSON.stringify(result.instructions.map(instr => _.omit(instr, ['data']))));
+    // log('debug', 'installer instructions',
+    //     JSON.stringify(result.instructions.map(instr => _.omit(instr, ['data']))));
     this.reportUnsupported(api, instructionGroups.unsupported, archivePath);
 
     return this.processMKDir(instructionGroups.mkdir, destinationPath)
@@ -1557,34 +1588,43 @@ class InstallManager {
     });
   }
 
-  private userVersionChoice(oldMod: IMod, store: ThunkStore<any>): Bluebird<string> {
-    return new Bluebird<string>((resolve, reject) => {
-      store.dispatch(showDialog(
-          'question', modName(oldMod),
-          {
-            text:
-            'An older version of this mod is already installed. '
-            + 'You can replace the existing one - which will update all profiles - '
-            + 'or install this one alongside it. In the latter case both versions '
-            + 'will be available and only the active profile will be updated. ',
-            options: { wrap: true },
-          },
-          [
-            { label: 'Cancel' },
-            { label: REPLACE_ACTION },
-            { label: INSTALL_ACTION },
-          ]))
-        .then((result: IDialogResult) => {
-          if (result.action === 'Cancel') {
-            reject(new UserCanceled());
-          } else {
-            resolve(result.action);
-          }
-        });
-    });
+  private queryProfileCount(store: ThunkStore<any>): number {
+    const state = store.getState();
+    const profiles = gameProfiles(state);
+    return profiles.length;
   }
 
-  private queryUserReplace(api: IExtensionApi, modIds: string[], gameId: string, counter: number) {
+  private userVersionChoice(oldMod: IMod, store: ThunkStore<any>): Bluebird<string> {
+    const totalProfiles = this.queryProfileCount(store);
+    return (totalProfiles === 1)
+      ? Bluebird.resolve(REPLACE_ACTION)
+      : new Bluebird<string>((resolve, reject) => {
+        store.dispatch(showDialog(
+            'question', modName(oldMod),
+            {
+              text:
+              'An older version of this mod is already installed. '
+              + 'You can replace the existing one - which will update all profiles - '
+              + 'or install this one alongside it. In the latter case both versions '
+              + 'will be available and only the active profile will be updated. ',
+              options: { wrap: true },
+            },
+            [
+              { label: 'Cancel' },
+              { label: REPLACE_ACTION },
+              { label: INSTALL_ACTION },
+            ]))
+          .then((result: IDialogResult) => {
+            if (result.action === 'Cancel') {
+              reject(new UserCanceled());
+            } else {
+              resolve(result.action);
+            }
+          });
+      });
+  }
+
+  private queryUserReplace(api: IExtensionApi, modIds: string[], gameId: string, installOptions: IInstallOptions) {
     return new Bluebird<IReplaceChoice>((resolve, reject) => {
       const state: IState = api.store.getState();
       const mods: IMod[] = Object.values(state.persistent.mods[gameId])
@@ -1630,7 +1670,7 @@ class InstallManager {
           text: 'Enter a variant name for "{{modName}}" to differentiate it from the original',
           input: [{
             id: 'variant',
-            value: counter > 2 ? counter.toString() : '2',
+            value: installOptions.variantNumber > 2 ? installOptions.variantNumber.toString() : '2',
             label: 'Variant',
           }],
           checkboxes: checkVariantRemember,
@@ -1660,14 +1700,29 @@ class InstallManager {
         });
       };
 
+      const mod = mods[0];
+      const modReference: IModReference = {
+        id: mod.id,
+        fileList: installOptions?.fileList,
+        archiveId: mod.archiveId,
+        gameId,
+        installerChoices: installOptions?.choices,
+        patches: installOptions?.patches,
+      }
+      const isDependency = (installOptions?.unattended === true) && (testModReference(mods[0], modReference) === false);
+      const addendum = isDependency
+        ? ' and is trying to be reinstalled as a dependency by another mod or collection.'
+        : '.'
+
       const queryDialog = () => api.showDialog('question', 'Install options',
         {
-          text: '"{{modName}}" has already been installed. Would you like to:',
+          bbcode: api.translate(`"{{modName}}" is already installed on your system${addendum}` + '[br][/br][br][/br]Would you like to:',
+            { replace: { modName: modName(mods[0], { version: false }), } }),
           choices: [
             {
               id: 'replace',
               value: true,
-              text: 'Replace the existing mod',
+              text: 'Replace the existing mod' + (isDependency ? ' (recommended)' : ''),
               subText: 'This will replace the existing mod on all your profiles.',
             },
             {
@@ -1774,8 +1829,8 @@ class InstallManager {
                 remember: true,
               }));
           } else {
-            if ((variant !== undefined) && (counter > 1)) {
-              variant += `.${counter}`;
+            if ((variant !== undefined) && (installOptions.variantNumber > 1)) {
+              variant += `.${installOptions.variantNumber}`;
             }
             choices = Bluebird.resolve({
               action,
@@ -1787,7 +1842,7 @@ class InstallManager {
       }
 
       if (choices === undefined) {
-        choices = queryDialog();
+        choices = isDependency ? Bluebird.resolve({ action: 'replace', remember: true }) : queryDialog();
       }
 
       choices
@@ -1820,7 +1875,7 @@ class InstallManager {
 
           if (result.action === 'variant') {
             if (result.remember === true) {
-              context.set('replace-or-variant', 'variant');
+              context?.set?.('replace-or-variant', 'variant');
             }
             if (currentProfile !== undefined) {
               const actions = modIds.map(id => setModEnabled(currentProfile.id, id, false));
@@ -1845,7 +1900,7 @@ class InstallManager {
             });
           } else if (result.action === 'replace') {
             if (result.remember === true) {
-              context.set('replace-or-variant', 'replace');
+              context?.set?.('replace-or-variant', 'replace');
             }
             if (modIds.length > 1) {
               queryVariantReplacement()
@@ -1955,16 +2010,31 @@ class InstallManager {
           referenceTag,
           meta: lookupResult,
         }, fileName,
-          (error, id) => {
+          async (error, id) => {
             if (error === null) {
-              resolve(id);
+              return resolve(id);
             } else if (error instanceof AlreadyDownloaded) {
-              resolve(error.downloadId);
+              return resolve(error.downloadId);
+            } else if (error instanceof DownloadIsHTML){
+              // If this is a google drive link and the file exceeds the
+              //  virus testing limit, Google will return an HTML page asking
+              //  the user for consent to download the file. Lets try this using
+              //  the browser extension.
+              const instructions = `You are trying to download "${lookupResult.fileName}" from "${resolvedSource}".\n`
+                                 + 'Depending on the portal, you may be re-directed several times.';
+              const result: string[] = await api.emitAndAwait('browse-for-download', resolvedSource, instructions);
+              if (result.length > 0) {
+                const newLookupRes = { ...lookupResult, sourceURI: result[0] };
+                const id = await this.downloadURL(api, newLookupRes, wasCanceled, referenceTag, campaign, fileName);
+                return resolve(id);
+              } else {
+                return reject(new UserCanceled());
+              }
             } else {
-              reject(error);
+              return reject(error);
             }
           }, 'never', { allowInstall: false, allowOpenHTML: false })) {
-          reject(new Error('download manager not installed?'));
+          return reject(new Error('download manager not installed?'));
         }
     }));
   }
@@ -2086,6 +2156,30 @@ class InstallManager {
       attributes['version'] = extra.version;
     }
 
+    if (extra.patches !== undefined) {
+      attributes['patches'] = extra.patches;
+    }
+
+    if (extra.fileList !== undefined) {
+      attributes['fileList'] = extra.fileList;
+    }
+
+    // if (extra.installerChoices !== undefined) {
+      // This actually masks a long standing bug and can barely be considered a fix.
+      //  Consider the following case:
+      //  1. User1 creates a fomod with a specific structure and uploads it to the site.
+      //  2. Curator uploads a collection and adds the fomod.
+      //  3. User2 downloads the collection - everything works fine.
+      //  4. User1 changes the fomod structure significantly (i.e. some installer steps become optional or removed entirely) and uploads his update to the site.
+      //  5. Curator downloads the update and uploads a new revision of his collection. Due to memoization functionality in the collections extension, the same fomod options as in the
+      //     first version of the mod are uploaded as part of the collection instead of the newer generated options.
+      //  6. User2 updates to the new revision of the collection, the install manager attempts to install the mod but will only generate instructions based on
+      //     the new fomod's structure, ommitting installer options that are not present in the new fomod.
+      //  7. User2 now has a correct installation of the mod which should work fine depending on the new fomod structure, but our installer option comparisons will fail
+      //     making it impossible for the collection to be considered fully installed/complete.
+      // attributes['installerChoices'] = extra.installerChoices;
+    //}
+
     api.store.dispatch(setModAttributes(gameId, modId, attributes));
   }
 
@@ -2168,7 +2262,11 @@ class InstallManager {
             api.store.dispatch(setModEnabled(prof.id, modId, true));
           });
 
-          this.applyExtraFromRule(api, gameId, modId, dep.extra);
+          this.applyExtraFromRule(api, gameId, modId, {
+            ...dep.extra,
+            fileList: dep.fileList ?? dep.extra?.fileList,
+            installerChoices: dep.installerChoices,
+            patches: dep.patches ?? dep.extra?.patches, });
 
           const mods = api.store.getState().persistent.mods[gameId];
           return { ...dep, mod: mods[modId] };
@@ -2242,11 +2340,13 @@ class InstallManager {
           } else if ([403, 404, 410].includes(err['statusCode'])) {
             api.showErrorNotification(
               'Failed to install dependency',
-              'The mod seems to have been deleted and can no longer be downloaded.', {
-              message: refName,
-              id: notiId,
-              allowReport: false,
-            });
+              `${err['message']}\n\nThis error is usually caused by an invalid request, maybe you followed a link that has expired or you lack permission to access it.`,
+              {
+                allowReport: false,
+                id: notiId,
+                message: refName,
+              });
+
             return Bluebird.resolve();
           } else if (err.code === 'ERR_INVALID_PROTOCOL') {
             const msg = err.message.replace(/ Expected .*/, '');
@@ -2296,7 +2396,7 @@ class InstallManager {
         // adequate to show an error but not as a bug in Vortex
         api.showErrorNotification('Failed to install dependencies',
           err.message, { allowReport: false });
-        return [];
+        return Bluebird.resolve([]);
       })
       .catch(UserCanceled, () => {
         log('info', 'canceled out of dependency install');
@@ -2305,15 +2405,15 @@ class InstallManager {
           type: 'info',
           message: 'Installation of dependencies canceled',
         });
-        return [];
+        return Bluebird.resolve([]);
       })
       .catch(err => {
         api.showErrorNotification('Failed to install dependencies', err);
-        return [];
+        return Bluebird.resolve([]);
       })
       .filter(dep => dep !== undefined);
 
-    return res;
+    return Bluebird.resolve(res);
   }
 
   private doInstallDependencies(api: IExtensionApi,
@@ -2389,27 +2489,28 @@ class InstallManager {
           })));
     };
 
-    const installDownload = (dep: IDependency, downloadId: string)
-        : Bluebird<string> => {
-      return Bluebird.resolve(this.mDependencyInstallsLimit.do(() => {
-        return abort.signal.aborted
-          ? Bluebird.reject(new UserCanceled(false))
-          : this.withInstructions(api,
-                              modName(sourceMod),
-                              renderModReference(dep.reference),
-                              dep.reference.tag ?? downloadId,
-                              dep.extra?.['instructions'],
-                              recommended, () =>
-          this.installModAsync(dep.reference, api, downloadId,
-            { choices: dep.installerChoices }, dep.fileList,
-            gameId, silent))
-          .catch(err => {
-            if (err instanceof UserCanceled) {
-              err.skipped = true;
-            }
-            return Bluebird.reject(err);
-          });
-        }));
+    const installDownload = (dep: IDependency, downloadId: string) : Bluebird<string> => {
+      return new Bluebird<string>((resolve, reject) => {
+        return this.mDependencyInstallsLimit.do(async () => {
+          return abort.signal.aborted
+            ? reject(new UserCanceled(false))
+            : this.withInstructions(api,
+                                modName(sourceMod),
+                                renderModReference(dep.reference),
+                                dep.reference?.tag ?? downloadId,
+                                dep.extra?.['instructions'],
+                                recommended, () =>
+            this.installModAsync(dep.reference, api, downloadId,
+              { choices: dep.installerChoices, patches: dep.patches }, dep.fileList,
+              gameId, silent)).then(res => resolve(res))
+            .catch(err => {
+              if (err instanceof UserCanceled) {
+                err.skipped = true;
+              }
+              return reject(err);
+            });
+        })
+      });
     };
 
     const doDownload = (dep: IDependency) => {
@@ -2494,22 +2595,20 @@ class InstallManager {
             // being installed having a different tag than the rule
             dep.reference = this.updateModRule(api, gameId, sourceModId, dep, {
               ...dep.reference,
+              fileList: dep.fileList,
+              patches: dep.patches,
+              installerChoices: dep.installerChoices,
               tag: downloads[downloadId].modInfo.referenceTag,
             }, recommended)?.reference;
 
-            // now at this point there may in fact already be a mod for the updated reference tag
-            if ((dep.mod === undefined) && (dep.reference !== undefined)) {
-              dep.mod = findModByRef(
-                dep.reference, api.getState().persistent.mods[gameId]);
-              log('info', 'updated mod', JSON.stringify(dep.mod));
-            }
+            dep.mod = findModByRef(dep.reference, api.getState().persistent.mods[gameId]);
           } else {
             log('info', 'downloaded as dependency', { downloadId });
           }
 
-          let queryWrongMD5 = Bluebird.resolve();
+          let queryWrongMD5 = () => Bluebird.resolve();
           if ((dep.mod === undefined)
-              && (dep.reference.versionMatch !== undefined)
+              && (dep.reference?.versionMatch !== undefined)
               && !isFuzzyVersion(dep.reference.versionMatch)
               && (dep.lookupResults.length > 0)
               && (dep.lookupResults.find(res => res.value.fileMD5 !== undefined) !== undefined)
@@ -2518,7 +2617,7 @@ class InstallManager {
               expected: dep.lookupResults[0].value.fileMD5,
               got: downloads[downloadId].fileMD5,
             });
-            queryWrongMD5 = api.showDialog('question', 'Unrecognized file {{reference}}', {
+            queryWrongMD5 = () => api.showDialog('question', 'Unrecognized file {{reference}}', {
               text: 'The file "{{fileName}}" that was just downloaded for dependency "{{reference}}" '
                   + 'is not the exact file expected. This might not be an issue if the mod has been '
                   + 'updated or repackaged by the author.\n'
@@ -2539,8 +2638,8 @@ class InstallManager {
           }
 
           return (dep.mod === undefined)
-            ? queryWrongMD5
-                .then(() => installDownload(dep, downloadId))
+            ? queryWrongMD5()
+                .then(() => api.getState().settings.downloads.collectionsInstallWhileDownloading ? installDownload(dep, downloadId) : Bluebird.resolve(null))
                 .catch(err => {
                   if (dep['reresolveDownloadHint'] === undefined) {
                     return Bluebird.reject(err);
@@ -2573,6 +2672,9 @@ class InstallManager {
 
     const phaseList = Object.values(phases);
 
+    const findDownloadId = (dep: IDependency) => {
+      return Object.keys(downloads).find(dlId => downloads[dlId].modInfo?.referenceTag === dep.reference.tag);
+    }
     const res: Bluebird<IDependency[]> = Bluebird.reduce(phaseList,
       (prev: IDependency[], depList: IDependency[], idx: number) => {
         if (depList.length === 0) {
@@ -2581,6 +2683,18 @@ class InstallManager {
         return this.doInstallDependenciesPhase(api, depList, gameId, sourceModId,
                                                recommended,
                                                doDownload, abort)
+          .then(async (updated: IDependency[]) => api.getState().settings.downloads.collectionsInstallWhileDownloading
+            ? Promise.resolve(updated)
+            : new Promise<IDependency[]>(async (resolve, reject) => {
+              const sorted = ([...updated]).sort((a, b) => (a.reference.fileSize ?? 0) - (b.reference.fileSize ?? 0));
+              try {
+                // Give the state a chance to catch up
+                await Promise.all(sorted.map(dep => installDownload(dep, findDownloadId(dep))));
+                return resolve(updated);
+              } catch (err) {
+                return reject(err);
+              }
+          }))
           .then((updated: IDependency[]) => {
             if (idx === phaseList.length - 1) {
               return Bluebird.resolve(updated);
@@ -2595,7 +2709,7 @@ class InstallManager {
       abort.abort();
     };
 
-    return res;
+    return Bluebird.resolve(res);
   }
 
   private updateModRule(api: IExtensionApi, gameId: string, sourceModId: string,
@@ -2625,7 +2739,9 @@ class InstallManager {
     dependencies.forEach(dep => {
       const updatedRef: IModReference = { ...dep.reference };
       updatedRef.idHint = dep.mod?.id;
-
+      updatedRef.installerChoices = dep.installerChoices;
+      updatedRef.patches = dep.patches;
+      updatedRef.fileList = dep.fileList;
       this.updateModRule(api, gameId, sourceModId, dep, updatedRef, recommended);
     });
     return Bluebird.resolve();
@@ -2653,13 +2769,16 @@ class InstallManager {
       ? (api.getState().persistent.profiles[profile.id]?.modState ?? {})
       : {};
 
+    const mods = api.getState().persistent.mods?.[gameId] ?? {};
+
     const { success, existing, error } = dependencies.reduce(
       (prev: IDependencySplit, dep: Dependency) => {
         if (dep['error'] !== undefined) {
           prev.error.push(dep as IDependencyError);
         } else {
-          const { mod } = dep as IDependency;
-          if ((mod === undefined) || !(modState[mod.id]?.enabled ?? false)) {
+          const { mod, reference } = dep as IDependency;
+          const modReference: IModReference = { ...(dep as IDependency), ...reference };
+          if ((mod === undefined) || !(modState[mod.id]?.enabled ?? false) || (!!mods[mod.id] && testModReference(mods[mod.id], modReference) !== true)) {
             prev.success.push(dep as IDependency);
           } else {
             prev.existing.push(dep as IDependency);
@@ -2849,7 +2968,9 @@ class InstallManager {
         .catch((err) => {
           api.dismissNotification(notificationId);
           api.store.dispatch(stopActivity('dependencies', 'gathering'));
-          api.showErrorNotification('Failed to check dependencies', err);
+          if (!(err instanceof UserCanceled)) {
+            api.showErrorNotification('Failed to check dependencies', err);
+          }
         })
         .finally(() => {
           log('debug', 'done installing dependencies', { gameId, modId });
@@ -3064,7 +3185,9 @@ class InstallManager {
         })
         .catch((err) => {
           api.store.dispatch(stopActivity('dependencies', 'gathering'));
-          api.showErrorNotification('Failed to check dependencies', err);
+          if (!(err instanceof UserCanceled)) {
+            api.showErrorNotification('Failed to check dependencies', err);
+          }
         })
         .finally(() => {
           api.dismissNotification(notificationId);
@@ -3103,7 +3226,7 @@ class InstallManager {
               ];
             }
             const result = await api.showDialog('info', title, {
-              text: instructions,
+              md: instructions,
               checkboxes,
               parameters: {
                 remaining,
@@ -3153,13 +3276,13 @@ class InstallManager {
       const fullPath: string =
         path.join(downloadPathForGame(state, downloadGame[0]), download.localPath);
       this.install(downloadId, fullPath, downloadGame,
-        api, { ...modInfo, download }, false, false, (error, id) => {
+        api, { ...modInfo, download }, false, silent, (error, id) => {
           if (error === null) {
-            resolve(id);
+            return resolve(id);
           } else {
-            reject(error);
+            return reject(error);
           }
-        }, forceGameId, fileList, true, undefined, silent);
+        }, forceGameId, fileList, silent, undefined, false);
     });
   }
 
@@ -3182,7 +3305,7 @@ class InstallManager {
       .then(() => this.fixDestination(source, destination))
       .then(fixedDest => move
         ? fs.renameAsync(source, fixedDest)
-          .catch(err => (err.code === 'EXDEV')
+          .catch(err => (['EXDEV', 'EEXIST'].includes(err.code))
             ? fs.copyAsync(source, fixedDest, { noSelfCopy: true })
             : Bluebird.reject(err))
         : fs.copyAsync(source, fixedDest, { noSelfCopy: true }));

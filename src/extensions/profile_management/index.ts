@@ -146,10 +146,9 @@ function refreshProfile(store: Redux.Store<any>, profile: IProfile,
  * @param {string} gameId
  */
 function activateGame(store: ThunkStore<IState>, gameId: string): Promise<void> {
-  log('info', 'activating game', { gameId });
   const state: IState = store.getState();
-  if (getSafe(state, ['settings', 'gameMode', 'discovered', gameId, 'path'], undefined)
-      === undefined) {
+  const gamePath = getSafe(state, ['settings', 'gameMode', 'discovered', gameId, 'path'], undefined);
+  if (gamePath === undefined) {
     store.dispatch(addNotification({
       type: 'warning',
       title: '{{gameId}} not enabled',
@@ -162,6 +161,8 @@ function activateGame(store: ThunkStore<IState>, gameId: string): Promise<void> 
     store.dispatch(setNextProfile(undefined));
     return Promise.resolve();
   }
+
+  log('info', 'activating game', { gameId, gamePath });
 
   const profileId = getSafe(state, ['settings', 'profiles', 'lastActiveProfile', gameId],
                             undefined);
@@ -621,9 +622,10 @@ function unmanageGame(api: IExtensionApi, gameId: string, gameName?: string): Pr
     bbcode: 'This will uninstall all mods managed by vortex and delete all profiles '
           + 'for "{{gameName}}", '
           + 'potentially including associated savegames, ini files and everything else Vortex '
-          + 'stores per-profile.<br/>'
-          + '[color=red]This is irreversible and we will not warn again, continue only if '
-          + 'you\'re sure this is what you want![/color]',
+          + 'stores per-profile.'
+          + '[br][/br][br][/br]'
+          + '[style=dialog-danger-text]This is irreversible and we will not warn again, continue only if '
+          + 'you\'re sure this is what you want![/style]',
     message,
     parameters: {
       gameName: game?.name ?? gameName ?? api.translate('<Missing game>'),
@@ -735,11 +737,31 @@ function init(context: IExtensionContext): boolean {
   context.registerAction('game-managed-buttons', 50, 'activate', {
     noCollapse: true,
   }, 'Activate', (instanceIds: string[]) => {
-    const gameId = instanceIds[0];
 
-    context.api.events.emit(
-      'analytics-track-event', 'Games', 'Activate' , gameId,
-    );
+    const gameId = instanceIds[0];
+    const state = context.api.getState();
+
+    let gameVersion = '';
+    let extensionVersion = '';
+    let gameProfileCount = 1;
+
+    if (gameId) {
+      const game = getGame(gameId);          
+      extensionVersion = game.version;
+      game.getInstalledVersion(discoveryByGame(state, gameId)).then((value) => {        gameVersion = value;      });
+      gameProfileCount = Object.values(state.persistent.profiles).filter((profile) => { return profile.gameId === gameId }).length;
+    }
+
+    const profileData = {
+      gameId: gameId,
+      gameVersion: gameVersion,
+      extensionVersion: extensionVersion,
+      gameProfileCount: gameProfileCount
+    };
+
+    log('info', 'activate profile', profileData);            
+
+    context.api.events.emit( 'analytics-track-event', 'Games', 'Activate' , gameId, profileData);
 
     checkOverridden(context.api, gameId)
       .then(() => {

@@ -1,3 +1,4 @@
+/* eslint-disable */
 import { dismissNotification, ICheckbox, updateNotification } from '../../actions/notifications';
 import { setSettingsPage, startActivity, stopActivity } from '../../actions/session';
 import {
@@ -12,8 +13,10 @@ import { INotification } from '../../types/INotification';
 import {IDiscoveryResult, IState} from '../../types/IState';
 import { ITableAttribute } from '../../types/ITableAttribute';
 import {ITestResult} from '../../types/ITestResult';
+import { IDeployOptions } from './types/IDeployOptions';
 import { ProcessCanceled, TemporaryError, UserCanceled } from '../../util/CustomErrors';
 import Debouncer from '../../util/Debouncer';
+import { waitForCondition} from '../../util/waitForCondition';
 import * as fs from '../../util/fs';
 import getNormalizeFunc, { Normalize } from '../../util/getNormalizeFunc';
 import getVortexPath from '../../util/getVortexPath';
@@ -150,8 +153,24 @@ function registerMerge(test: MergeTest, merge: MergeFunc, modType: string) {
   mergers.push({ test, merge, modType });
 }
 
+const shouldSuppressUpdate = (api: IExtensionApi) => {
+  const state = api.getState();
+  const suppressOnActivities = ['conflicts', 'installing_dependencies', 'purging'];
+  const isActivityRunning = (activity: string) =>
+    getSafe(state, ['session', 'base', 'activity', 'mods'], []).includes(activity) // purge/deploy
+    || getSafe(state, ['session', 'base', 'activity', activity], []).length > 0; // installing_dependencies
+  const suppressingActivities = suppressOnActivities.filter(activity => isActivityRunning(activity));
+  const suppressing = suppressingActivities.length > 0;
+  if (suppressing) {
+    log('info', 'skipping settings bake', { activities: suppressingActivities });
+  }
+  return suppressing;
+}
+
 function bakeSettings(api: IExtensionApi, profile: IProfile, sortedModList: IMod[]) {
-  return api.emitAndAwait('bake-settings', profile.gameId, sortedModList, profile);
+  return shouldSuppressUpdate(api)
+    ? Promise.resolve()
+    : api.emitAndAwait('bake-settings', profile.gameId, sortedModList, profile);
 }
 
 function showCycles(api: IExtensionApi, cycles: string[][], gameId: string) {
@@ -934,6 +953,7 @@ function cleanupIncompleteInstalls(api: IExtensionApi) {
 }
 
 function onModsEnabled(api: IExtensionApi, deploymentTimer: Debouncer) {
+  // TODO: Make sure the file overrides are checked on mod enable/disable!
   return (mods: string[], enabled: boolean, gameId: string, options?: IEnableOptions) => {
     const { store } = api;
     const state: IState = store.getState();
@@ -1001,7 +1021,7 @@ function onDeploySingleMod(api: IExtensionApi) {
       .then(() => (mod !== undefined)
         ? (enable !== false)
           ? activator.activate(modPath, mod.installationPath, subdir(mod),
-                               new BlacklistSet([], game, normalize))
+                               new BlacklistSet(mod.fileOverrides ?? [], game, normalize))
           : activator.deactivate(modPath, subdir(mod), mod.installationPath)
         : Promise.resolve())
       .tapCatch(() => {
@@ -1110,9 +1130,14 @@ function once(api: IExtensionApi) {
         updateModDeployment(api, manual, profileId, progressCB), 2000);
 
   api.events.on('deploy-mods', (callback: (err: Error) => void, profileId?: string,
-                                progressCB?: (text: string, percent: number) => void) => {
+                                progressCB?: (text: string, percent: number) => void,
+                                deployOptions?: IDeployOptions) => { // Can't believe that 7+ years in, we still didn't have deployment options defined.
     if (!(callback as any).called) {
-      deploymentTimer.runNow(callback, true, profileId, progressCB);
+      if (deployOptions?.manual === true) {
+        deploymentTimer.runNow(callback, true, profileId, progressCB);
+      } else {
+        deploymentTimer.runNow(callback, false, profileId, progressCB);
+      }
     }
   });
 
@@ -1216,7 +1241,11 @@ function once(api: IExtensionApi) {
     (previous, current) => {
       const gameMode = activeGameId(store.getState());
       if (previous[gameMode] !== current[gameMode]) {
-        onNeedToDeploy(api, current[gameMode]);
+        waitForCondition({
+          callback: () => onceCB(() => onNeedToDeploy(api, current[gameMode])),
+          condition: () => getSafe(api.getState(), ['session', 'base', 'activity', 'installing_dependencies'], []).length === 0,
+          required: () => getSafe(api.getState(), ['persistent', 'deployment', 'needToDeploy', gameMode], false),
+        });
       }
     },
   );
@@ -1240,20 +1269,20 @@ function once(api: IExtensionApi) {
       const options = optionsIn === undefined
         ? {}
         : (typeof(optionsIn) === 'boolean')
-        ? { allowAutoEnable: optionsIn }
-        : optionsIn;
+          ? { allowAutoEnable: optionsIn }
+          : optionsIn;
       onStartInstallDownload(api, installManager, downloadId, options, callback);
     });
 
   api.events.on(
       'remove-mod',
-      (gameMode: string, modId: string, cb?: (error: Error) => void, options?: IRemoveModOptions) =>
-          onRemoveMod(api, getAllActivators(), gameMode, modId, cb, options));
+      (gameId: string, modId: string, cb?: (error: Error) => void, options?: IRemoveModOptions) =>
+          onRemoveMod(api, getAllActivators(), gameId, modId, cb, options));
 
   api.events.on('remove-mods',
-       (gameMode: string, modIds: string[], cb?: (error: Error) => void,
+       (gameId: string, modIds: string[], cb?: (error: Error) => void,
         options?: IRemoveModOptions) => {
-      onRemoveMods(api, getAllActivators(), gameMode, modIds, cb, options);
+      onRemoveMods(api, getAllActivators(), gameId, modIds, cb, options);
     });
 
   api.events.on('create-mod',

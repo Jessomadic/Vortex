@@ -23,13 +23,16 @@ async function walk(base, rel) {
       files = [].concat(files, rec);
     }));
   } catch (err) {
-    console.error('Failed to walk', base, err.message);
+    console.error('Failed to walk', base, err);
   }
 
   return files;
 }
 
 exports.default = async function(context) {
+
+  console.log('createMD5List.js');
+
   const assetsPath = path.join(context.appOutDir, 'resources', 'app.asar.unpacked', 'assets');
 
   const hashes = await Promise.all((await walk(context.appOutDir, ''))
@@ -39,10 +42,17 @@ exports.default = async function(context) {
       const buf = hash
         .update(fileData)
         .digest();
+      console.log(`${relPath}:${buf.toString('hex')}`);
       return `${relPath}:${buf.toString('hex')}`;
     }));
 
-  fs.writeFile(path.join(assetsPath, 'md5sums.csv'), hashes.join('\n'));
+  try {
+    await fs.writeFile(path.join(assetsPath, 'md5sums.csv'), hashes.join('\n'));
+  } catch (err) {
+    console.error(`Failed to write: ${err.message}`);
+  }
+  
+  console.log(`Successfully wrote ${path.join(assetsPath, 'md5sums.csv')}`);
 
   return [path.join(assetsPath, 'md5sums.csv')];
 }

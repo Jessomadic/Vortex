@@ -120,6 +120,9 @@ interface IConnectedProps extends IModProps {
   downloadPath: string;
   showDropzone: boolean;
   autoInstall: boolean;
+  // some mod actions are not allowed while installing dependencies/collections
+  //  e.g. combining a mod with other patch mods while the collection is still installing.
+  suppressModActions: boolean;
 }
 
 interface IActionProps {
@@ -718,7 +721,7 @@ class ModList extends ComponentEx<IProps, IComponentState> {
       filter: new OptionsFilter([
         { value: true, label: this.props.t('Enabled') },
         { value: false, label: this.props.t('Disabled') },
-        { value: undefined, label: this.props.t('Uninstalled') },
+        { value: null, label: this.props.t('Uninstalled') },
       ], true),
     };
 
@@ -911,7 +914,7 @@ class ModList extends ComponentEx<IProps, IComponentState> {
   private updateModsWithState(newProps: IProps): Promise<void> {
     const { gameMode } = newProps;
     let changed = false;
-    const newModsWithState = {};
+    const newModsWithState: { [modId: string]: IModWithState } = {};
 
     const installedIds = new Set<string>();
     const oldProps = this.mLastUpdateProps;
@@ -962,6 +965,10 @@ class ModList extends ComponentEx<IProps, IComponentState> {
             id: mod.archiveId,
             state: 'downloaded',
             archiveId: mod.archiveId,
+            type: '',
+            installationPath: undefined,
+            enabled: null,
+            enabledTime: 0,
             attributes: {
               ...mod.info,
               installTime: download.fileTime,
@@ -1072,7 +1079,13 @@ class ModList extends ComponentEx<IProps, IComponentState> {
   }
 
   private updateModGrouping(modsWithState) {
-    const modList = Object.keys(modsWithState).map(key => modsWithState[key]);
+    const modList = Object.keys(modsWithState).reduce((accum, key) => {
+      const mod = modsWithState[key];
+      if (mod) {
+        accum.push(mod);
+      }
+      return accum;
+    }, []);
     const grouped = groupMods(modList, { groupBy: 'file', multipleEnabled: false });
 
     const groupedMods = grouped.reduce((prev: { [id: string]: IModWithState[] }, value) => {
@@ -1341,7 +1354,7 @@ class ModList extends ComponentEx<IProps, IComponentState> {
         { id: 'archive', text: t('Delete Archive'), value: false },
       ];
 
-    const insert = ' [color=red]' + t('from all profiles') + '[/color]';
+    const insert = ' [style=dialog-danger-text]' + t('from all profiles') + '[/style]';
 
     onShowDialog('question', 'Confirm removal', {
       bbcode: t('Do you really want to remove this mod{{insert}}?', {
@@ -1374,8 +1387,23 @@ class ModList extends ComponentEx<IProps, IComponentState> {
 
   private install = (archiveIds: string | string[]) => {
     if (Array.isArray(archiveIds)) {
-      archiveIds.forEach(archiveId =>
-        this.context.api.events.emit('start-install-download', archiveId));
+      withBatchContext('install-mod', archiveIds, () => {
+        return Promise.all(archiveIds.map(async archiveId => {
+          return toPromise<string>(cb => this.context.api.events.emit('start-install-download', archiveId, {
+            allowAutoEnable: false,
+          }, cb)).catch(err => {
+            if (err instanceof UserCanceled) {
+              return Promise.resolve(null);
+            }
+          });
+        })).then((modIds: string[]) => {
+          const filtered = modIds.filter(modId => modId !== null);
+          if (this.props.autoInstall && filtered.length > 0) {
+            this.props.onSetModsEnabled(this.props.profileId, filtered, true);
+          }
+          return Promise.resolve();
+        });
+      })
     } else {
       this.context.api.events.emit('start-install-download', archiveIds);
     }
@@ -1405,8 +1433,13 @@ class ModList extends ComponentEx<IProps, IComponentState> {
         return Promise.all(
           validIds.map(modId => {
             const choices = getSafe(mods[modId], ['attributes', 'installerChoices'], undefined);
+            const installOpts: IInstallOptions = choices !== undefined ? {
+              choices, allowAutoEnable: false,
+            } : {
+              allowAutoEnable: false,
+            };
             return toPromise(cb => this.context.api.events.emit('start-install-download',
-                mods[modId].archiveId, { choices, allowAutoEnable: false }, cb))
+                mods[modId].archiveId, installOpts, cb))
               .catch(err => {
                 if (err instanceof UserCanceled) {
                   return;
@@ -1443,19 +1476,27 @@ class ModList extends ComponentEx<IProps, IComponentState> {
   }
 
   private canBeCombined = (modIds: string[]) => {
-    const { t, mods } = this.props;
+    const { t, mods, suppressModActions } = this.props;
 
     const notInstalled = modIds.find(modId => mods[modId] === undefined);
     if (notInstalled !== undefined) {
       return t('You can only combine installed mods') ;
     }
+
+    if (suppressModActions) {
+      return t('Try again after installing dependencies');
+    }
+
     return true;
   }
 
   private combine = (modIds: string[]) => {
-    const { gameMode } = this.props;
+    const { gameMode, suppressModActions } = this.props;
     const { api } = this.context;
-
+    if (suppressModActions) {
+      api.showErrorNotification('Try again after installing dependencies', 'Mod actions are currently disabled', { allowReport: false });
+      return;
+    }
     return combineMods(api, gameMode, modIds);
   }
 
@@ -1500,10 +1541,20 @@ class ModList extends ComponentEx<IProps, IComponentState> {
 
 const empty = {};
 
+const shouldSuppressModActions = (state: IState): boolean => {
+  const suppressOnActivities = ['conflicts', 'installing_dependencies', 'deployment', 'purging'];
+  const isActivityRunning = (activity: string) =>
+    getSafe(state, ['session', 'base', 'activity', 'mods'], []).includes(activity) // purge/deploy
+    || getSafe(state, ['session', 'base', 'activity', activity], []).length > 0; // installing_dependencies
+  const suppressingActivities = suppressOnActivities.filter(activity => isActivityRunning(activity));
+  const suppressing = suppressingActivities.length > 0;
+  return suppressing;
+}
+
 function mapStateToProps(state: IState): IConnectedProps {
   const profile = selectors.activeProfile(state);
   const gameMode = selectors.activeGameId(state);
-
+  const suppressModActions = shouldSuppressModActions(state);
   return {
     mods: getSafe(state, ['persistent', 'mods', gameMode], empty),
     modState: getSafe(profile, ['modState'], empty),
@@ -1515,6 +1566,7 @@ function mapStateToProps(state: IState): IConnectedProps {
     downloadPath: selectors.downloadPath(state),
     showDropzone: state.settings.mods.showDropzone,
     autoInstall: state.settings.automation.install,
+    suppressModActions,
   };
 }
 
